@@ -37,3 +37,7 @@ Blending eta-squared with the classifier probiabilites gives the most convincing
 <img width="1604" height="1419" alt="image" src="https://github.com/user-attachments/assets/a2f28052-5202-47d8-b2c2-9e6996bbac0a" />
 
 Pseudotsuga menziesii (Douglas Fir) is the most generalized, Alnus Rubra (Red Alder) likes the hills, Arbutus menziesii (Pacific Madrone) favors the savannahs in the Willamette valley, and Kopsiopsis strobilaceae is parasitic to the Pacific Madrone, but found only in Southwestern Oregon and Northwestern California. Overall we get great overlap with their actual ranges and habitat preferences, with distinct hill and valley favoring species, and the parasitic species occupying a subsection of the wider Madrone range. 
+
+### Contribute
+
+This is free to use for any reason. It's not trivial to set up by any means but we may streamline it more as we continue exploring this framework. If you find any interest in using or improving it, feel free to fork or contribute to this repository. We're all in this together!
