@@ -1,3 +1,16 @@
+# iNaturalist + global GIS species suitability mapping with eta-squared and XGBoost/ExtraTrees
+
+This project requires ~1 TB of data to run yourself:
+- bulk global iNaturalist species occurrences via GBIF.org
+- Terraclimate 12 month global climate summaries (latest or multi-year)
+- SoilGrids 2.0 global grids
+- Global TWI 
+- Global DEM via HydroSHEDs
+- Global GLiM lithographs.
+- MCD12Q1 land use classification map (latest)
+
+This system is memory-optimized to run on laptops, I did it with a USB drive to make it extra slow for myself and focus on optimization, so much of the data requires transforming into better COG TIF format or indexing for quick CSV lookup. All scripts are provided, including an enrichment script that lets you define any taxa levels from iNaturalist and enrich cumulative csvs to run through our suitability mapping programs. This all needs documentation or you can feed files into a good LLM to get the workflow spelled out for you. 
+
 ## Docs TBD, 
 
 Look at Collection.md and each folder for how to start gathering.
