@@ -40,4 +40,4 @@ Pseudotsuga menziesii (Douglas Fir) is the most generalized, Alnus Rubra (Red Al
 
 ### Contribute
 
-This is free to use for any reason. It's not trivial to set up by any means but we may streamline it more as we continue exploring this framework. If you find any interest in using or improving it, feel free to fork or contribute to this repository. We're all in this together!
+This is free to use for any reason under an MIT License. It's not trivial to set up by any means but we may streamline it more as we continue exploring this framework. If you find any interest in using or improving it, feel free to fork or contribute to this repository. We're all in this together!
