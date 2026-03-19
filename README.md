@@ -23,7 +23,7 @@ Look at iNaturalistOccurrences and Suitability folders for how to start processi
 
 Note our results are using an "artist's touch" to manually adjust eta-squared priors and manually control the blending between the ML and eta-squared results. The actual realism is species-dependent and requires more survey data, but this is already a great result running on fairly naive assumptions.
 
-Blending eta-squared with the classifier probiabilites gives the most convincing results, e.g. the deserts truly are not suitable for most of the plants here:
+Blending eta-squared with the classifier probabilites gives the most convincing results, e.g. the deserts truly are not suitable for most of the plants here:
 <img width="1604" height="1419" alt="image" src="https://github.com/user-attachments/assets/a2f28052-5202-47d8-b2c2-9e6996bbac0a" />
 
 Eta-squared style empirically-weighted suitability scoring, with stress and reliability modifiers, compared to actual habitat ranges. We next added a machine learning habitat classifier to blend with this.
