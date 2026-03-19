@@ -6,7 +6,7 @@ Look at iNaturalistOccurrences and Suitability folders for how to start processi
 
 ## Initial Results
 
-Eta-squared style empirically-weighted suitability scoring, with stress and reliability modifiers, compared to actual habitat ranges.
+Eta-squared style empirically-weighted suitability scoring, with stress and reliability modifiers, compared to actual habitat ranges. We next added a machine learning habitat classifier to blend with this.
 <img width="1780" height="1454" alt="image" src="https://github.com/user-attachments/assets/9f915fe0-b86c-4b35-84fe-7b45877b27c5" />
 <img width="1371" height="730" alt="image" src="https://github.com/user-attachments/assets/fb658554-135e-4227-a258-1bc02b052ac4" />
 <img width="1545" height="734" alt="image" src="https://github.com/user-attachments/assets/a567d6eb-4c36-4465-b8ea-25f9bc63e627" />
