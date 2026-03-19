@@ -36,6 +36,11 @@ XGBoost/ExtraTrees result
 Blending eta-squared with the classifier probiabilites gives the most convincing results, e.g. the deserts truly are not suitable for most of the plants here:
 <img width="1604" height="1419" alt="image" src="https://github.com/user-attachments/assets/a2f28052-5202-47d8-b2c2-9e6996bbac0a" />
 
+Numeric comparisons:
+<img width="1757" height="1635" alt="image" src="https://github.com/user-attachments/assets/c8688028-c6a7-4213-9ff6-aefee6378fca" />
+<img width="2646" height="1470" alt="image" src="https://github.com/user-attachments/assets/0d15095e-27e5-4709-9fc1-d19f06ab3fad" />
+
+
 Pseudotsuga menziesii (Douglas Fir) is the most generalized, Alnus Rubra (Red Alder) likes the hills, Arbutus menziesii (Pacific Madrone) favors the savannahs in the Willamette valley, and Kopsiopsis strobilaceae is parasitic to the Pacific Madrone, but found only in Southwestern Oregon and Northwestern California. Overall we get great overlap with their actual ranges and habitat preferences, with distinct hill and valley favoring species, and the parasitic species occupying a subsection of the wider Madrone range. 
 
 ### Contribute
