@@ -5,7 +5,7 @@ This project requires ~1 TB of data to run yourself:
 - Terraclimate 12 month global climate summaries (latest or multi-year)
 - SoilGrids 2.0 global grids
 - Global TWI 
-- Global DEM via HydroSHEDs
+- Global DEM via HydroSHEDs + derived tiles (scripts supplied)
 - Global GLiM lithographs.
 - MCD12Q1 land use classification map (latest)
 
