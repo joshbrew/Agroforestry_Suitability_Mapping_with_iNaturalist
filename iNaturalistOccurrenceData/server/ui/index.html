@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Taxonomy Browser</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="title">Taxonomy Browser</div>
+      <div class="sub">Browse taxonomy, inspect rows, and export selected taxonomy trees or level sets.</div>
+    </div>
+    <div class="top-actions">
+      <a class="linkbtn" href="/help" target="_blank" rel="noopener">Help</a>
+      <a class="linkbtn" href="/meta" target="_blank" rel="noopener">/meta</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="pane">
+      <div class="pane-head">
+        <div class="crumbs" id="crumbs"></div>
+        <div class="controls">
+          <button id="btnUp" class="btn">Up</button>
+
+          <label class="lbl">Sort
+            <select id="sort">
+              <option value="id">id</option>
+              <option value="name">name</option>
+              <option value="count_desc">count desc</option>
+              <option value="count">count</option>
+            </select>
+          </label>
+
+          <label class="lbl">Limit
+            <input id="treeLimit" type="number" min="1" step="1" value="200" />
+          </label>
+
+          <div class="pager">
+            <button id="btnPrev" class="btn">Prev</button>
+            <button id="btnNext" class="btn">Next</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="status" id="treeStatus"></div>
+      <div class="tablewrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th style="width:110px;">nodeId</th>
+              <th style="width:110px;">rank</th>
+              <th>name</th>
+              <th style="width:120px; text-align:right;">count</th>
+            </tr>
+          </thead>
+          <tbody id="treeBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pane">
+      <div class="pane-head">
+        <div class="right-title">
+          <div class="title2">Occurrences</div>
+          <div class="sub2" id="occTitle">Select a species node</div>
+        </div>
+
+        <div class="controls">
+          <label class="lbl">Limit
+            <input id="occLimit" type="number" min="1" step="1" value="200" />
+          </label>
+          <div class="pager">
+            <button id="btnOccPrev" class="btn">Prev</button>
+            <button id="btnOccNext" class="btn">Next</button>
+          </div>
+          <a id="occJsonLink" class="linkbtn" href="#" target="_blank" rel="noopener">JSON</a>
+        </div>
+      </div>
+
+      <div class="status" id="occStatus"></div>
+
+      <div id="map" class="map"></div>
+      <div class="tablewrap">
+        <table class="tbl">
+          <thead id="occHead"></thead>
+          <tbody id="occBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pane admin-pane">
+      <div class="pane-head">
+        <div class="right-title">
+          <div class="title2">Export</div>
+          <div class="sub2">Export a selected subtree or a level set to species files.</div>
+        </div>
+      </div>
+
+      <div class="section-block" id="indexSection">
+        <div class="section-title">Index</div>
+        <div class="section-controls">
+          <button id="btnBuildTaxa" class="btn">Build taxonomy phase 1</button>
+          <button id="btnFinalizeTaxa" class="btn">Finalize taxonomy index</button>
+        </div>
+      </div>
+
+      <div class="section-block">
+        <div class="section-title">Job</div>
+        <div class="jobbox">
+          <div class="jobline" id="jobStatus">Idle</div>
+          <div class="jobbar">
+            <div class="jobbarfill" id="jobProgressFill"></div>
+          </div>
+          <div class="jobmeta" id="jobProgressMeta"></div>
+        </div>
+      </div>
+
+      <div class="section-block">
+        <div class="section-title">Scope</div>
+        <div class="info-box" id="exportNodeInfo">Selected node: (root)</div>
+        <div class="info-box" id="exportLevelInfo">Current level: (root)</div>
+
+        <div class="section-controls">
+          <button id="btnExportSelected" class="btn primary">Export selected subtree</button>
+          <button id="btnExportLevelAll" class="btn">Export current level all nodes</button>
+          <button id="btnExportLoaded" class="btn">Export loaded page subset</button>
+        </div>
+      </div>
+
+      <div class="section-block">
+        <div class="section-title">Output</div>
+
+        <label class="stacklbl">Output type
+          <select id="exportMode">
+            <option value="coords">coords</option>
+            <option value="raw">full extracted rows</option>
+          </select>
+        </label>
+
+        <label class="stacklbl">Output root
+          <input id="exportRoot" class="pathinput" type="text" />
+        </label>
+
+        <div class="status compact" id="exportResult"></div>
+      </div>
+
+      <div class="section-block meta-block">
+        <div class="section-title">Status</div>
+        <div class="status compact" id="adminMeta"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span class="muted">Tip:</span> Selected subtree exports one folder rooted at the selected node. Current level exports every node currently at that level to separate subtrees.
+  </footer>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>
