@@ -40,7 +40,8 @@ Numeric comparisons:
 <img width="1757" height="1635" alt="image" src="https://github.com/user-attachments/assets/c8688028-c6a7-4213-9ff6-aefee6378fca" />
 <img width="2646" height="1470" alt="image" src="https://github.com/user-attachments/assets/0d15095e-27e5-4709-9fc1-d19f06ab3fad" />
 Raw occurrence data, you'll see that the ML model has very strong overlap with the clusters here:
-<img width="1941" height="1643" alt="image" src="https://github.com/user-attachments/assets/e0a16db2-56d0-4987-9fe4-3baf04640d46" />
+<img width="1612" height="1349" alt="image" src="https://github.com/user-attachments/assets/618dbe74-54c2-420a-b40f-7e02f57a19b9" />
+
 
 
 Pseudotsuga menziesii (Douglas Fir) is the most generalized, Alnus Rubra (Red Alder) likes the hills, Arbutus menziesii (Pacific Madrone) favors the savannahs in the Willamette valley, and Kopsiopsis strobilaceae is parasitic to the Pacific Madrone, but found only in Southwestern Oregon and Northwestern California. Overall we get great overlap with their actual ranges and habitat preferences, with distinct hill and valley favoring species, and the parasitic species occupying a subsection of the wider Madrone range. 
