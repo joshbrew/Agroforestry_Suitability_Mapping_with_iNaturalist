@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import math
 import re
 import sys
@@ -9,6 +10,9 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+
+
+RESUME_VERSION = 1
 
 
 def parse_csv_list(value):
@@ -328,6 +332,156 @@ def build_overviews(ds_path, levels, resampling):
         ds.update_tags(ns="rio_overview", resampling=str(resampling))
 
 
+def resume_state_path_for(tmp_path):
+    tmp_path = Path(tmp_path)
+    return tmp_path.parent / f"{tmp_path.name}.resume.json"
+
+
+def path_stat_token(path):
+    path = Path(path)
+    st = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": int(st.st_size),
+        "mtime_ns": int(st.st_mtime_ns),
+    }
+
+
+def write_json(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    tmp.replace(path)
+
+
+def load_json(path):
+    path = Path(path)
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def safe_unlink(path):
+    path = Path(path)
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def build_single_resume_signature(src_path, out_path, profile, total_blocks, on_read_error):
+    src_info = path_stat_token(src_path)
+    return {
+        "version": RESUME_VERSION,
+        "kind": "single",
+        "src": src_info,
+        "out_path": str(Path(out_path).resolve()),
+        "total_blocks": int(total_blocks),
+        "width": int(profile["width"]),
+        "height": int(profile["height"]),
+        "count": int(profile["count"]),
+        "dtype": str(profile["dtype"]),
+        "nodata": profile.get("nodata"),
+        "transform": tuple(profile["transform"]) if profile.get("transform") is not None else None,
+        "crs": profile.get("crs").to_string() if profile.get("crs") is not None else None,
+        "blockxsize": int(profile["blockxsize"]),
+        "blockysize": int(profile["blockysize"]),
+        "compress": str(profile.get("compress", "")),
+        "predictor": int(profile.get("predictor", 0)),
+        "interleave": str(profile.get("interleave", "")),
+        "on_read_error": str(on_read_error),
+    }
+
+
+def build_stack_resume_signature(src_items, out_path, profile, total_blocks, on_read_error):
+    src_infos = [path_stat_token(item["path"]) for item in src_items]
+    band_names = [str(item["name"]) for item in src_items]
+    return {
+        "version": RESUME_VERSION,
+        "kind": "depth-stack",
+        "srcs": src_infos,
+        "band_names": band_names,
+        "out_path": str(Path(out_path).resolve()),
+        "total_blocks": int(total_blocks),
+        "width": int(profile["width"]),
+        "height": int(profile["height"]),
+        "count": int(profile["count"]),
+        "dtype": str(profile["dtype"]),
+        "nodata": profile.get("nodata"),
+        "transform": tuple(profile["transform"]) if profile.get("transform") is not None else None,
+        "crs": profile.get("crs").to_string() if profile.get("crs") is not None else None,
+        "blockxsize": int(profile["blockxsize"]),
+        "blockysize": int(profile["blockysize"]),
+        "compress": str(profile.get("compress", "")),
+        "predictor": int(profile.get("predictor", 0)),
+        "interleave": str(profile.get("interleave", "")),
+        "on_read_error": str(on_read_error),
+    }
+
+
+def prepare_resume(tmp_path, signature, allow_resume):
+    tmp_path = Path(tmp_path)
+    state_path = resume_state_path_for(tmp_path)
+    state = load_json(state_path)
+
+    if not allow_resume:
+        safe_unlink(tmp_path)
+        safe_unlink(state_path)
+        return False, 0, None
+
+    if not tmp_path.exists() or not state:
+        if not tmp_path.exists() and state_path.exists():
+            safe_unlink(state_path)
+        return False, 0, state_path
+
+    if state.get("signature") != signature:
+        print(
+            f"[resume] discarding incompatible partial output: {tmp_path.name}",
+            file=sys.stderr,
+            flush=True,
+        )
+        safe_unlink(tmp_path)
+        safe_unlink(state_path)
+        return False, 0, state_path
+
+    completed_blocks = int(state.get("completed_blocks", 0))
+    total_blocks = int(signature["total_blocks"])
+    completed_blocks = max(0, min(completed_blocks, total_blocks))
+    print(
+        f"[resume] resuming {tmp_path.name} from block {completed_blocks:,}/{total_blocks:,}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return True, completed_blocks, state_path
+
+
+def write_resume_state(state_path, signature, completed_blocks, started_at, read_error_blocks):
+    if state_path is None:
+        return
+    payload = {
+        "signature": signature,
+        "completed_blocks": int(completed_blocks),
+        "started_at": float(started_at),
+        "updated_at": time.time(),
+        "read_error_blocks": int(read_error_blocks),
+    }
+    write_json(state_path, payload)
+
+
+def maybe_log_read_error(prefix, src_name, window, exc, block_idx, total_blocks):
+    print(
+        f"[warn] {prefix} read error block={block_idx:,}/{total_blocks:,} "
+        f"window=row_off:{int(window.row_off)},col_off:{int(window.col_off)},height:{int(window.height)},width:{int(window.width)} "
+        f"src={src_name} err={exc}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def merge_vrt_to_tif(
     src_path,
     out_path,
@@ -338,13 +492,13 @@ def merge_vrt_to_tif(
     progress_every_seconds,
     on_read_error,
     num_threads,
+    resume_partial,
 ):
     src_path = Path(src_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(out_path.suffix + ".part")
-    if tmp_path.exists():
-        tmp_path.unlink()
+    state_path = resume_state_path_for(tmp_path)
 
     with rasterio.Env(GDAL_CACHEMAX=int(gdal_cache_mb)):
         with rasterio.open(src_path) as src:
@@ -374,40 +528,82 @@ def merge_vrt_to_tif(
             width = int(src.width)
             height = int(src.height)
             total_blocks = int(math.ceil(height / block_h) * math.ceil(width / block_w))
+            signature = build_single_resume_signature(src_path, out_path, profile, total_blocks, on_read_error)
+            resume_ok, completed_blocks, state_path = prepare_resume(tmp_path, signature, resume_partial)
+            started_at = time.time()
+            read_error_blocks = 0
             progress_state = make_progress_state(
                 phase_label=f"merge {src_path.stem}",
                 total=total_blocks,
                 unit_name="blocks",
                 report_every_seconds=progress_every_seconds,
+                started_at=started_at,
             )
 
-            with rasterio.open(tmp_path, "w", **profile) as dst:
-                block_idx = 0
-                for _, window in dst.block_windows(1):
-                    block_idx += 1
-                    try:
-                        arr = src.read(window=window, masked=False)
-                    except Exception:
-                        if on_read_error == "raise":
-                            raise
-                        fill_value = default_fill_value(src.dtypes[0], src.nodata)
-                        arr = np.full(
-                            (src.count, int(window.height), int(window.width)),
-                            fill_value,
-                            dtype=np.dtype(src.dtypes[0]),
+            if resume_ok:
+                progress_state["last_report_completed"] = completed_blocks
+                maybe_emit_progress(
+                    progress_state,
+                    completed_blocks,
+                    extra=f"file={src_path.name} resumed=1",
+                    force=True,
+                )
+                open_mode = "r+"
+            else:
+                safe_unlink(tmp_path)
+                safe_unlink(state_path)
+                open_mode = "w"
+
+            if open_mode == "w":
+                write_resume_state(state_path, signature, 0, started_at, 0)
+
+            try:
+                with rasterio.open(tmp_path, open_mode, **({} if open_mode == "r+" else profile)) as dst:
+                    for block_idx, (_, window) in enumerate(dst.block_windows(1), start=1):
+                        if block_idx <= completed_blocks:
+                            continue
+                        try:
+                            arr = src.read(window=window, masked=False)
+                        except Exception as exc:
+                            if on_read_error == "raise":
+                                write_resume_state(state_path, signature, block_idx - 1, started_at, read_error_blocks)
+                                raise
+                            maybe_log_read_error("merge", src_path.name, window, exc, block_idx, total_blocks)
+                            fill_value = default_fill_value(src.dtypes[0], src.nodata)
+                            arr = np.full(
+                                (src.count, int(window.height), int(window.width)),
+                                fill_value,
+                                dtype=np.dtype(src.dtypes[0]),
+                            )
+                            read_error_blocks += 1
+
+                        dst.write(arr, window=window)
+                        completed_blocks = block_idx
+                        if (
+                            completed_blocks == total_blocks
+                            or completed_blocks == 1
+                            or completed_blocks % 32 == 0
+                        ):
+                            write_resume_state(state_path, signature, completed_blocks, started_at, read_error_blocks)
+                        maybe_emit_progress(
+                            progress_state,
+                            completed_blocks,
+                            extra=(
+                                f"file={src_path.name}"
+                                if read_error_blocks == 0
+                                else f"file={src_path.name} read_error_blocks={read_error_blocks:,}"
+                            ),
+                            force=(completed_blocks == total_blocks),
                         )
-                    dst.write(arr, window=window)
-                    maybe_emit_progress(
-                        progress_state,
-                        block_idx,
-                        extra=f"file={src_path.name}",
-                        force=(block_idx == total_blocks),
-                    )
+            except Exception:
+                write_resume_state(state_path, signature, completed_blocks, started_at, read_error_blocks)
+                raise
 
     if out_path.exists():
         out_path.unlink()
     tmp_path.replace(out_path)
-    return out_path
+    safe_unlink(state_path)
+    return out_path, read_error_blocks
 
 
 def collect_depth_stack_sources(existing_merged, requested_names):
@@ -443,6 +639,7 @@ def build_depth_stack_from_merged(
     progress_every_seconds,
     on_read_error,
     num_threads,
+    resume_partial,
 ):
     if not src_items:
         raise ValueError("src_items must not be empty")
@@ -450,8 +647,7 @@ def build_depth_stack_from_merged(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(out_path.suffix + ".part")
-    if tmp_path.exists():
-        tmp_path.unlink()
+    state_path = resume_state_path_for(tmp_path)
 
     src_paths = [Path(item["path"]).resolve() for item in src_items]
 
@@ -504,51 +700,92 @@ def build_depth_stack_from_merged(
             width = int(ref.width)
             height = int(ref.height)
             total_blocks = int(math.ceil(height / block_h) * math.ceil(width / block_w))
+            signature = build_stack_resume_signature(src_items, out_path, profile, total_blocks, on_read_error)
+            resume_ok, completed_blocks, state_path = prepare_resume(tmp_path, signature, resume_partial)
+            started_at = time.time()
+            read_error_blocks = 0
             progress_state = make_progress_state(
                 phase_label=f"stack {out_path.stem}",
                 total=total_blocks,
                 unit_name="blocks",
                 report_every_seconds=progress_every_seconds,
+                started_at=started_at,
             )
 
-            with rasterio.open(tmp_path, "w", **profile) as dst:
-                dst.update_tags(stack_kind="soilgrids_depthstack")
-                for band_idx, item in enumerate(src_items, start=1):
-                    dst.set_band_description(band_idx, str(item["name"]))
-                    dst.update_tags(
-                        band_idx,
-                        logical_name=str(item["name"]),
-                        prop=str(item["prop"]),
-                        depth=str(item["depth"]),
-                        stat=str(item["stat"]),
-                    )
+            if resume_ok:
+                progress_state["last_report_completed"] = completed_blocks
+                maybe_emit_progress(
+                    progress_state,
+                    completed_blocks,
+                    extra=f"file={out_path.name} resumed=1",
+                    force=True,
+                )
+                open_mode = "r+"
+            else:
+                safe_unlink(tmp_path)
+                safe_unlink(state_path)
+                open_mode = "w"
 
-                block_idx = 0
-                for _, window in dst.block_windows(1):
-                    block_idx += 1
-                    block_arrays = []
-                    for ds in src_datasets:
-                        try:
-                            arr = ds.read(1, window=window, masked=False)
-                        except Exception:
-                            if on_read_error == "raise":
-                                raise
-                            fill_value = default_fill_value(dtype_name, common_nodata)
-                            arr = np.full(
-                                (int(window.height), int(window.width)),
-                                fill_value,
-                                dtype=np.dtype(dtype_name),
+            if open_mode == "w":
+                write_resume_state(state_path, signature, 0, started_at, 0)
+
+            try:
+                with rasterio.open(tmp_path, open_mode, **({} if open_mode == "r+" else profile)) as dst:
+                    if open_mode == "w":
+                        dst.update_tags(stack_kind="soilgrids_depthstack")
+                        for band_idx, item in enumerate(src_items, start=1):
+                            dst.set_band_description(band_idx, str(item["name"]))
+                            dst.update_tags(
+                                band_idx,
+                                logical_name=str(item["name"]),
+                                prop=str(item["prop"]),
+                                depth=str(item["depth"]),
+                                stat=str(item["stat"]),
                             )
-                        if arr.dtype != np.dtype(dtype_name):
-                            arr = arr.astype(dtype_name, copy=False)
-                        block_arrays.append(arr)
-                    dst.write(np.stack(block_arrays, axis=0), window=window)
-                    maybe_emit_progress(
-                        progress_state,
-                        block_idx,
-                        extra=f"file={out_path.name}",
-                        force=(block_idx == total_blocks),
-                    )
+
+                    for block_idx, (_, window) in enumerate(dst.block_windows(1), start=1):
+                        if block_idx <= completed_blocks:
+                            continue
+                        block_arrays = []
+                        for ds in src_datasets:
+                            try:
+                                arr = ds.read(1, window=window, masked=False)
+                            except Exception as exc:
+                                if on_read_error == "raise":
+                                    write_resume_state(state_path, signature, block_idx - 1, started_at, read_error_blocks)
+                                    raise
+                                maybe_log_read_error("stack", ds.name, window, exc, block_idx, total_blocks)
+                                fill_value = default_fill_value(dtype_name, common_nodata)
+                                arr = np.full(
+                                    (int(window.height), int(window.width)),
+                                    fill_value,
+                                    dtype=np.dtype(dtype_name),
+                                )
+                                read_error_blocks += 1
+                            if arr.dtype != np.dtype(dtype_name):
+                                arr = arr.astype(dtype_name, copy=False)
+                            block_arrays.append(arr)
+                        dst.write(np.stack(block_arrays, axis=0), window=window)
+                        completed_blocks = block_idx
+                        if (
+                            completed_blocks == total_blocks
+                            or completed_blocks == 1
+                            or completed_blocks % 32 == 0
+                        ):
+                            write_resume_state(state_path, signature, completed_blocks, started_at, read_error_blocks)
+                        maybe_emit_progress(
+                            progress_state,
+                            completed_blocks,
+                            extra=(
+                                f"file={out_path.name}"
+                                if read_error_blocks == 0
+                                else f"file={out_path.name} read_error_blocks={read_error_blocks:,}"
+                            ),
+                            force=(completed_blocks == total_blocks),
+                        )
+            except Exception:
+                write_resume_state(state_path, signature, completed_blocks, started_at, read_error_blocks)
+                raise
         finally:
             for ds in src_datasets:
                 ds.close()
@@ -556,7 +793,8 @@ def build_depth_stack_from_merged(
     if out_path.exists():
         out_path.unlink()
     tmp_path.replace(out_path)
-    return out_path
+    safe_unlink(state_path)
+    return out_path, read_error_blocks
 
 
 def parse_overview_levels(value):
@@ -625,8 +863,13 @@ def main():
     ap.add_argument(
         "--on-read-error",
         choices=["raise", "nodata"],
-        default="raise",
+        default="nodata",
         help="On source block read failure, either raise or write nodata/default-fill into that block",
+    )
+    ap.add_argument(
+        "--no-resume-partial",
+        action="store_true",
+        help="Disable reuse of existing .part outputs and restart partial merges from scratch",
     )
     ap.add_argument(
         "--build-overviews",
@@ -698,6 +941,8 @@ def main():
     reused = 0
     stack_rebuilt = 0
     stack_reused = 0
+    merge_read_error_blocks = 0
+    stack_read_error_blocks = 0
 
     if args.merge_mode in {"single", "all"}:
         for idx, name in enumerate(requested_names, start=1):
@@ -719,7 +964,7 @@ def main():
 
             print(f"[merge] dataset={name} src={src_path} out={out_path}", file=sys.stderr, flush=True)
             dataset_started = time.time()
-            merge_vrt_to_tif(
+            _, read_error_blocks = merge_vrt_to_tif(
                 src_path=src_path,
                 out_path=out_path,
                 gdal_cache_mb=args.gdal_cache_mb,
@@ -729,12 +974,14 @@ def main():
                 progress_every_seconds=args.progress_every_seconds,
                 on_read_error=args.on_read_error,
                 num_threads=args.num_threads,
+                resume_partial=not args.no_resume_partial,
             )
+            merge_read_error_blocks += int(read_error_blocks)
             if args.build_overviews and overview_levels:
                 build_overviews(out_path, overview_levels, overview_resampling)
             rebuilt += 1
             print(
-                f"[merge] done dataset={name} elapsed={format_elapsed(time.time() - dataset_started)}",
+                f"[merge] done dataset={name} elapsed={format_elapsed(time.time() - dataset_started)} read_error_blocks={read_error_blocks:,}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -744,7 +991,10 @@ def main():
                 total=len(requested_names),
                 started_at=phase_started,
                 unit_name="datasets",
-                extra=f"reused={reused:,} rebuilt={rebuilt:,} current={name}",
+                extra=(
+                    f"reused={reused:,} rebuilt={rebuilt:,} current={name} "
+                    f"read_error_blocks={merge_read_error_blocks:,}"
+                ),
             )
 
     if args.merge_mode in {"depth-stacks", "all"}:
@@ -782,7 +1032,7 @@ def main():
                 flush=True,
             )
             stack_started = time.time()
-            build_depth_stack_from_merged(
+            _, read_error_blocks = build_depth_stack_from_merged(
                 src_items=src_items,
                 out_path=out_path,
                 gdal_cache_mb=args.gdal_cache_mb,
@@ -792,12 +1042,14 @@ def main():
                 progress_every_seconds=args.progress_every_seconds,
                 on_read_error=args.on_read_error,
                 num_threads=args.num_threads,
+                resume_partial=not args.no_resume_partial,
             )
+            stack_read_error_blocks += int(read_error_blocks)
             if args.build_overviews and overview_levels:
                 build_overviews(out_path, overview_levels, overview_resampling)
             stack_rebuilt += 1
             print(
-                f"[stack] done dataset={out_path.stem} elapsed={format_elapsed(time.time() - stack_started)}",
+                f"[stack] done dataset={out_path.stem} elapsed={format_elapsed(time.time() - stack_started)} read_error_blocks={read_error_blocks:,}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -807,13 +1059,17 @@ def main():
                 total=len(stack_items),
                 started_at=phase_started,
                 unit_name="stacks",
-                extra=f"reused={stack_reused:,} rebuilt={stack_rebuilt:,} current={out_path.stem}",
+                extra=(
+                    f"reused={stack_reused:,} rebuilt={stack_rebuilt:,} current={out_path.stem} "
+                    f"read_error_blocks={stack_read_error_blocks:,}"
+                ),
             )
 
     print(
         "Finished. "
         f"single_rebuilt={rebuilt:,} single_reused={reused:,} "
         f"stack_rebuilt={stack_rebuilt:,} stack_reused={stack_reused:,} "
+        f"merge_read_error_blocks={merge_read_error_blocks:,} stack_read_error_blocks={stack_read_error_blocks:,} "
         f"elapsed={format_elapsed(time.time() - phase_started)}",
         file=sys.stderr,
         flush=True,

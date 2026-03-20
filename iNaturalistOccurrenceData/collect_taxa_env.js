@@ -108,6 +108,7 @@ const DEFAULT_PATHS = Object.freeze({
   twiTif: "D:/wetness/twi_edtm_120m.tif",
   soilgridsScript: "D:/soilgrids/sample_soilgrids_coords.py",
   soilgridsRoot: "D:/soilgrids/data",
+  soilgridsMergedRoot: "D:/soilgrids/merged",
   glimScript: "D:/GLiM/sample_glim_coords.py",
   glimTif: "D:/GLiM/glim_rasters/glim_id_1km_cog.tif",
   glimLookupCsv: "D:/GLiM/glim_rasters/glim_lookup.csv",
@@ -136,6 +137,76 @@ function pathExists(filePath) {
     .stat(filePath)
     .then((st) => st)
     .catch(() => null);
+}
+
+function pathExistsSync(filePath) {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function dirExistsSync(dirPath) {
+  const st = pathExistsSync(dirPath);
+  return !!(st && st.isDirectory());
+}
+
+function fileExistsSync(filePath) {
+  const st = pathExistsSync(filePath);
+  return !!(st && st.isFile());
+}
+
+function treeHasTifSync(rootPath) {
+  if (!dirExistsSync(rootPath)) return false;
+
+  const pending = [rootPath];
+  while (pending.length) {
+    const cur = pending.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (let i = 0; i < entries.length; i++) {
+      const ent = entries[i];
+      const full = path.join(cur, ent.name);
+      if (ent.isDirectory()) {
+        pending.push(full);
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      const name = String(ent.name || '').toLowerCase();
+      if (name.endsWith('.tif') && !name.endsWith('.tif.part')) return true;
+    }
+  }
+
+  return false;
+}
+
+function resolveSoilgridsSampler(opts) {
+  const baseScript = String(opts.soilgridsScript || '').trim();
+  const baseRoot = String(opts.soilgridsRoot || '').trim();
+  const mergedRoot = String(opts.soilgridsMergedRoot || DEFAULT_PATHS.soilgridsMergedRoot || '').trim();
+  const mergedScript = baseScript
+    ? path.join(path.dirname(baseScript), 'sample_soilgrids_merged.py')
+    : '';
+
+  if (mergedRoot && dirExistsSync(mergedRoot) && treeHasTifSync(mergedRoot) && mergedScript && fileExistsSync(mergedScript)) {
+    return {
+      mode: 'merged',
+      script: mergedScript,
+      root: mergedRoot,
+    };
+  }
+
+  return {
+    mode: 'base',
+    script: baseScript,
+    root: baseRoot,
+  };
 }
 
 async function fileExistsNonEmpty(filePath) {
@@ -975,6 +1046,7 @@ function parseArgs(argv) {
     twiChunkSize: 250000,
     soilgridsScript: DEFAULT_PATHS.soilgridsScript,
     soilgridsRoot: DEFAULT_PATHS.soilgridsRoot,
+    soilgridsMergedRoot: DEFAULT_PATHS.soilgridsMergedRoot,
     soilgridsProps: "bdod,cec,clay,sand,silt,soc,phh2o,nitrogen,cfvo",
     soilgridsDepths: "0-5cm,5-15cm,15-30cm",
     soilgridsChunkSize: 50000,
@@ -1053,6 +1125,9 @@ function parseArgs(argv) {
           "SoilGrids:",
           "  --soilgrids-script D:/soilgrids/sample_soilgrids_coords.py",
           "  --soilgrids-root D:/soilgrids/data",
+          "  --soilgrids-merged-root D:/soilgrids/merged",
+          "  auto-detects sample_soilgrids_merged.py in the same folder as --soilgrids-script",
+          "  and prefers merged sampling when the merged root contains .tif files",
           "  --soilgrids-props bdod,cec,clay,sand,silt,soc,phh2o,nitrogen,cfvo",
           "  --soilgrids-depths 0-5cm,5-15cm,15-30cm",
           "  --soilgrids-chunk-size 200000",
@@ -1076,6 +1151,7 @@ function parseArgs(argv) {
           `  default TWI tif: ${DEFAULT_PATHS.twiTif}`,
           `  default SoilGrids script: ${DEFAULT_PATHS.soilgridsScript}`,
           `  default SoilGrids root: ${DEFAULT_PATHS.soilgridsRoot}`,
+          `  default SoilGrids merged root: ${DEFAULT_PATHS.soilgridsMergedRoot}`,
           `  default GLiM script: ${DEFAULT_PATHS.glimScript}`,
           `  default GLiM tif: ${DEFAULT_PATHS.glimTif}`,
           `  default GLiM lookup: ${DEFAULT_PATHS.glimLookupCsv}`,
@@ -1210,6 +1286,9 @@ function parseArgs(argv) {
       i++;
     } else if (a === "--soilgrids-root") {
       out.soilgridsRoot = String(needValue(i, a));
+      i++;
+    } else if (a === "--soilgrids-merged-root") {
+      out.soilgridsMergedRoot = String(needValue(i, a));
       i++;
     } else if (a === "--soilgrids-props") {
       out.soilgridsProps = String(needValue(i, a));
@@ -2085,15 +2164,19 @@ function buildRunPlan(opts, outRoot) {
     });
   }
 
-  if (wanted.has("soilgrids") && opts.soilgridsScript && opts.soilgridsRoot) {
+  const soilgridsSampler = resolveSoilgridsSampler(opts);
+  if (wanted.has("soilgrids") && soilgridsSampler.script && soilgridsSampler.root) {
+    console.log(
+      `[sample-plan] soilgrids sampler=${soilgridsSampler.mode} script=${soilgridsSampler.script} root=${soilgridsSampler.root}`,
+    );
     commands.push({
       key: "soilgrids",
       outPath: outputs.soilgrids,
       cmd: opts.pythonBin,
       args: [
-        opts.soilgridsScript,
+        soilgridsSampler.script,
         "--root",
-        opts.soilgridsRoot,
+        soilgridsSampler.root,
         "--coords",
         coordsPath,
         "--out",
@@ -2111,7 +2194,7 @@ function buildRunPlan(opts, outRoot) {
         "--depths",
         opts.soilgridsDepths,
         "--workers",
-        1, 
+        1,
         "--fallback-radius-pixels",
         3, //nearest neighbor search e.g. for shoreline species that might miss the soilgrids raster edges, not bulletproof
         "--chunk-size",

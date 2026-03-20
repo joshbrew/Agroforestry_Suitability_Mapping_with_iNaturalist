@@ -843,8 +843,6 @@ def ensure_dataset_tile_index(vrt_path, dataset_name, index_dir, rebuild=False):
     return index_path, False
 
 
-
-
 def assign_block_points_to_sources_vectorized(tile_index, candidates, block_rows, block_cols):
     candidates = np.asarray(candidates, dtype=np.int64)
     n_points = int(block_rows.size)
@@ -1149,6 +1147,96 @@ def read_block_array(
         block_cache[cache_key] = arr
     return arr
 
+def fill_missing_from_neighbors_inline(
+    out_vals,
+    base_rows,
+    base_cols,
+    ds,
+    block_h,
+    block_w,
+    neighbor_offsets,
+    dataset_name=None,
+    on_read_error="nan",
+    error_state=None,
+    repair_read_errors=False,
+    repair_root=None,
+    repair_base_url=BASE_URL_DEFAULT,
+    vrt_cache=None,
+    repair_state=None,
+    repair_backup_bad=False,
+    repair_retries=5,
+    repair_timeout=120,
+    block_cache=None,
+):
+    if not neighbor_offsets:
+        return 0
+
+    out_vals = np.asarray(out_vals, dtype=np.float64)
+    base_rows = np.asarray(base_rows, dtype=np.int64)
+    base_cols = np.asarray(base_cols, dtype=np.int64)
+
+    missing_local = np.flatnonzero(~np.isfinite(out_vals))
+    if missing_local.size == 0:
+        return 0
+
+    nodata = ds.nodata
+    nodata_f = float(nodata) if nodata is not None else None
+    filled = 0
+
+    for j in missing_local:
+        base_r = int(base_rows[j])
+        base_c = int(base_cols[j])
+        found = None
+
+        for dr, dc in neighbor_offsets:
+            rr = base_r + dr
+            cc = base_c + dc
+
+            if rr < 0 or cc < 0 or rr >= ds.height or cc >= ds.width:
+                continue
+
+            r0 = int((rr // block_h) * block_h)
+            c0 = int((cc // block_w) * block_w)
+            h = min(block_h, ds.height - r0)
+            w = min(block_w, ds.width - c0)
+
+            arr = read_block_array(
+                ds=ds,
+                r0=r0,
+                c0=c0,
+                h=h,
+                w=w,
+                dataset_name=dataset_name,
+                on_read_error=on_read_error,
+                error_state=error_state,
+                repair_read_errors=repair_read_errors,
+                repair_root=repair_root,
+                repair_base_url=repair_base_url,
+                vrt_cache=vrt_cache,
+                repair_state=repair_state,
+                repair_backup_bad=repair_backup_bad,
+                repair_retries=repair_retries,
+                repair_timeout=repair_timeout,
+                block_cache=block_cache,
+            )
+            if arr is None:
+                continue
+
+            val = float(arr[rr - r0, cc - c0])
+            if nodata is not None and val == nodata_f:
+                continue
+            if not np.isfinite(val):
+                continue
+
+            found = val
+            break
+
+        if found is not None:
+            out_vals[j] = found
+            filled += 1
+
+    return filled
+
 
 def sample_pixel_coords_from_dataset(
     ds,
@@ -1293,6 +1381,14 @@ def sample_dataset_blocked_tile_index(
     starts = sampling_plan["starts"]
     ends = sampling_plan["ends"]
 
+    fallback_radius_pixels = int(fallback_radius_pixels)
+    neighbor_offsets = build_neighbor_offsets(fallback_radius_pixels) if fallback_radius_pixels > 0 else []
+    vrt_block_cache = {}
+    vrt_block_h = None
+    vrt_block_w = None
+    if neighbor_offsets and vrt_ds is not None:
+        vrt_block_h, vrt_block_w = get_block_shape(vrt_ds)
+
     source_block_caches = {}
     block_progress_state = None
     total_block_groups = int(len(starts))
@@ -1307,13 +1403,17 @@ def sample_dataset_blocked_tile_index(
     for block_idx, (start, end) in enumerate(zip(starts, ends), start=1):
         local = order[start:end]
         first = local[0]
+
+        block_rows = vrows[local]
+        block_cols = vcols[local]
+        block_vals = np.full(local.shape[0], np.nan, dtype=np.float64)
+
         candidates = tile_index_candidates(tile_index, int(brow[first]), int(bcol[first]))
         assigned_ids = np.empty(0, dtype=np.int64)
         matched_points = 0
+        neighbors_filled = 0
 
         if candidates.size > 0:
-            block_rows = vrows[local]
-            block_cols = vcols[local]
             assigned, src_rows, src_cols = assign_block_points_to_sources_vectorized(
                 tile_index=tile_index,
                 candidates=candidates,
@@ -1323,6 +1423,7 @@ def sample_dataset_blocked_tile_index(
 
             assigned_ids = np.unique(assigned[assigned >= 0])
             matched_points = int(np.count_nonzero(assigned >= 0))
+
             for src_id in assigned_ids:
                 mask = assigned == int(src_id)
                 source_path = str(tile_index["paths"][int(src_id)])
@@ -1358,97 +1459,46 @@ def sample_dataset_blocked_tile_index(
                     progress_label=source_progress_label,
                     progress_every_seconds=progress_every_seconds,
                 )
-                out[valid_idx[local[mask]]] = vals
+                block_vals[mask] = vals
+
+        if neighbor_offsets and vrt_ds is not None:
+            neighbors_filled = fill_missing_from_neighbors_inline(
+                out_vals=block_vals,
+                base_rows=block_rows,
+                base_cols=block_cols,
+                ds=vrt_ds,
+                block_h=vrt_block_h,
+                block_w=vrt_block_w,
+                neighbor_offsets=neighbor_offsets,
+                dataset_name=dataset_name,
+                on_read_error=on_read_error,
+                error_state=error_state,
+                repair_read_errors=repair_read_errors,
+                repair_root=repair_root,
+                repair_base_url=repair_base_url,
+                vrt_cache=vrt_cache,
+                repair_state=repair_state,
+                repair_backup_bad=repair_backup_bad,
+                repair_retries=repair_retries,
+                repair_timeout=repair_timeout,
+                block_cache=vrt_block_cache,
+            )
+
+        out[valid_idx[local]] = block_vals
 
         maybe_emit_progress(
             block_progress_state,
             block_idx,
             extra=(
                 f"dataset={dataset_name} candidates={candidates.size:,} "
-                f"matched_points={matched_points:,} sources={assigned_ids.size:,}"
+                f"matched_points={matched_points:,} sources={assigned_ids.size:,} "
+                f"neighbors_filled={neighbors_filled:,}"
             ),
             force=(block_idx == total_block_groups),
         )
 
-    fallback_radius_pixels = int(fallback_radius_pixels)
-    if fallback_radius_pixels > 0 and vrt_ds is not None:
-        neighbor_offsets = build_neighbor_offsets(fallback_radius_pixels)
-        fallback_candidates = np.flatnonzero(np.isnan(out) & sampling_plan["in_bounds_mask"])
-        block_h, block_w = get_block_shape(vrt_ds)
-        vrt_block_cache = {}
-        nodata = vrt_ds.nodata
-        nodata_f = float(nodata) if nodata is not None else None
-
-        rows = sampling_plan["rows"]
-        cols = sampling_plan["cols"]
-        fallback_progress_state = None
-        total_fallback = int(fallback_candidates.shape[0])
-        if progress_label and total_fallback > 0:
-            fallback_progress_state = make_progress_state(
-                phase_label=f"{progress_label} subphase=fallback-search",
-                total=total_fallback,
-                unit_name="rows",
-                report_every_seconds=progress_every_seconds,
-            )
-
-        for fallback_idx, i in enumerate(fallback_candidates, start=1):
-            base_r = int(rows[i])
-            base_c = int(cols[i])
-            found = None
-
-            for dr, dc in neighbor_offsets:
-                rr = base_r + dr
-                cc = base_c + dc
-                if rr < 0 or cc < 0 or rr >= vrt_ds.height or cc >= vrt_ds.width:
-                    continue
-
-                r0 = int((rr // block_h) * block_h)
-                c0 = int((cc // block_w) * block_w)
-                h = min(block_h, vrt_ds.height - r0)
-                w = min(block_w, vrt_ds.width - c0)
-
-                arr = read_block_array(
-                    ds=vrt_ds,
-                    r0=r0,
-                    c0=c0,
-                    h=h,
-                    w=w,
-                    dataset_name=dataset_name,
-                    on_read_error=on_read_error,
-                    error_state=error_state,
-                    repair_read_errors=repair_read_errors,
-                    repair_root=repair_root,
-                    repair_base_url=repair_base_url,
-                    vrt_cache=vrt_cache,
-                    repair_state=repair_state,
-                    repair_backup_bad=repair_backup_bad,
-                    repair_retries=repair_retries,
-                    repair_timeout=repair_timeout,
-                    block_cache=vrt_block_cache,
-                )
-                if arr is None:
-                    continue
-
-                val = float(arr[rr - r0, cc - c0])
-                if nodata is not None and val == nodata_f:
-                    continue
-                if not np.isfinite(val):
-                    continue
-
-                found = val
-                break
-
-            if found is not None:
-                out[i] = found
-
-            maybe_emit_progress(
-                fallback_progress_state,
-                fallback_idx,
-                extra=f"dataset={dataset_name} radius={fallback_radius_pixels}",
-                force=(fallback_idx == total_fallback),
-            )
-
     return out
+
 
 def sample_dataset_blocked(
     ds,
@@ -1484,12 +1534,12 @@ def sample_dataset_blocked(
     ends = sampling_plan["ends"]
     block_h = sampling_plan["block_h"]
     block_w = sampling_plan["block_w"]
-    rows = sampling_plan["rows"]
-    cols = sampling_plan["cols"]
 
     block_cache = {}
     nodata = ds.nodata
     nodata_f = float(nodata) if nodata is not None else None
+    fallback_radius_pixels = int(fallback_radius_pixels)
+    neighbor_offsets = build_neighbor_offsets(fallback_radius_pixels) if fallback_radius_pixels > 0 else []
 
     block_progress_state = None
     total_block_groups = int(len(starts))
@@ -1509,6 +1559,10 @@ def sample_dataset_blocked(
         c0 = int(bcol[first] * block_w)
         h = min(block_h, ds.height - r0)
         w = min(block_w, ds.width - c0)
+
+        block_rows = vrows[local]
+        block_cols = vcols[local]
+        block_vals = np.full(local.shape[0], np.nan, dtype=np.float64)
 
         arr = read_block_array(
             ds=ds,
@@ -1530,93 +1584,47 @@ def sample_dataset_blocked(
             block_cache=block_cache,
         )
         if arr is not None:
-            rr = vrows[local] - r0
-            cc = vcols[local] - c0
-            vals = arr[rr, cc].astype(np.float64, copy=False)
-            out[valid_idx[local]] = vals
+            rr = block_rows - r0
+            cc = block_cols - c0
+            block_vals = arr[rr, cc].astype(np.float64, copy=True)
+            if nodata_to_nan and nodata is not None:
+                block_vals[block_vals == nodata_f] = np.nan
+
+        neighbors_filled = 0
+        if neighbor_offsets:
+            neighbors_filled = fill_missing_from_neighbors_inline(
+                out_vals=block_vals,
+                base_rows=block_rows,
+                base_cols=block_cols,
+                ds=ds,
+                block_h=block_h,
+                block_w=block_w,
+                neighbor_offsets=neighbor_offsets,
+                dataset_name=dataset_name,
+                on_read_error=on_read_error,
+                error_state=error_state,
+                repair_read_errors=repair_read_errors,
+                repair_root=repair_root,
+                repair_base_url=repair_base_url,
+                vrt_cache=vrt_cache,
+                repair_state=repair_state,
+                repair_backup_bad=repair_backup_bad,
+                repair_retries=repair_retries,
+                repair_timeout=repair_timeout,
+                block_cache=block_cache,
+            )
+
+        out[valid_idx[local]] = block_vals
 
         maybe_emit_progress(
             block_progress_state,
             block_idx,
-            extra=f"dataset={dataset_name}",
+            extra=f"dataset={dataset_name} neighbors_filled={neighbors_filled:,}",
             force=(block_idx == total_block_groups),
         )
 
     if nodata_to_nan and nodata is not None:
         out[out == nodata_f] = np.nan
-
-    fallback_radius_pixels = int(fallback_radius_pixels)
-    if fallback_radius_pixels > 0:
-        neighbor_offsets = build_neighbor_offsets(fallback_radius_pixels)
-        fallback_candidates = np.flatnonzero(np.isnan(out) & sampling_plan["in_bounds_mask"])
-        fallback_progress_state = None
-        total_fallback = int(fallback_candidates.shape[0])
-        if progress_label and total_fallback > 0:
-            fallback_progress_state = make_progress_state(
-                phase_label=f"{progress_label} subphase=fallback-search",
-                total=total_fallback,
-                unit_name="rows",
-                report_every_seconds=progress_every_seconds,
-            )
-
-        for fallback_idx, i in enumerate(fallback_candidates, start=1):
-            base_r = int(rows[i])
-            base_c = int(cols[i])
-            found = None
-
-            for dr, dc in neighbor_offsets:
-                rr = base_r + dr
-                cc = base_c + dc
-
-                if rr < 0 or cc < 0 or rr >= ds.height or cc >= ds.width:
-                    continue
-
-                r0 = int((rr // block_h) * block_h)
-                c0 = int((cc // block_w) * block_w)
-                h = min(block_h, ds.height - r0)
-                w = min(block_w, ds.width - c0)
-
-                arr = read_block_array(
-                    ds=ds,
-                    r0=r0,
-                    c0=c0,
-                    h=h,
-                    w=w,
-                    dataset_name=dataset_name,
-                    on_read_error=on_read_error,
-                    error_state=error_state,
-                    repair_read_errors=repair_read_errors,
-                    repair_root=repair_root,
-                    repair_base_url=repair_base_url,
-                    vrt_cache=vrt_cache,
-                    repair_state=repair_state,
-                    repair_backup_bad=repair_backup_bad,
-                    repair_retries=repair_retries,
-                    repair_timeout=repair_timeout,
-                    block_cache=block_cache,
-                )
-                if arr is None:
-                    continue
-
-                val = float(arr[rr - r0, cc - c0])
-
-                if nodata is not None and val == nodata_f:
-                    continue
-                if not np.isfinite(val):
-                    continue
-
-                found = val
-                break
-
-            if found is not None:
-                out[i] = found
-
-            maybe_emit_progress(
-                fallback_progress_state,
-                fallback_idx,
-                extra=f"dataset={dataset_name} radius={fallback_radius_pixels}",
-                force=(fallback_idx == total_fallback),
-            )
 
     return out
 
@@ -1941,7 +1949,6 @@ def resolve_row_window(args):
     return start_row, max_rows
 
 
-
 def write_output_chunk(
     writer,
     rows,
@@ -2237,45 +2244,6 @@ def sample_chunk_results(
 
     return results, any_in_bounds
 
-def compute_retry_indices(results, requested_names, valid_coord, retryable_mask):
-    missing_mask = np.zeros(valid_coord.shape[0], dtype=bool)
-    for name in requested_names:
-        missing_mask |= ~np.isfinite(results[name])
-    missing_mask &= valid_coord
-    if retryable_mask is not None:
-        missing_mask &= retryable_mask
-    return np.flatnonzero(missing_mask)
-
-
-def merge_retry_results(base_results, retry_results, retry_idx, requested_names):
-    if retry_idx.size == 0:
-        return 0
-
-    filled = 0
-    for name in requested_names:
-        base_arr = base_results[name]
-        retry_arr = retry_results[name]
-        if retry_arr.shape[0] != retry_idx.shape[0]:
-            raise RuntimeError(
-                f"Retry result length mismatch for {name}: expected {retry_idx.shape[0]}, got {retry_arr.shape[0]}"
-            )
-
-        base_missing = ~np.isfinite(base_arr[retry_idx])
-        if not np.any(base_missing):
-            continue
-
-        retry_good = np.isfinite(retry_arr)
-        fill_mask = base_missing & retry_good
-        if not np.any(fill_mask):
-            continue
-
-        fill_idx = retry_idx[fill_mask]
-        base_arr[fill_idx] = retry_arr[fill_mask]
-        filled += int(np.count_nonzero(fill_mask))
-
-    return filled
-
-
 def format_elapsed(seconds):
     seconds = max(0.0, float(seconds))
     hours = int(seconds // 3600)
@@ -2288,7 +2256,6 @@ def format_elapsed(seconds):
     return f"{secs:.1f}s"
 
 
-
 def format_rate(count, seconds, unit_name):
     seconds = max(float(seconds), 1e-9)
     rate = float(count) / seconds
@@ -2299,12 +2266,10 @@ def format_rate(count, seconds, unit_name):
     return f"{rate:,.2f} {unit_name}/s"
 
 
-
 def format_eta(remaining_count, rate_per_second):
     if remaining_count is None or rate_per_second is None or rate_per_second <= 0:
         return "n/a"
     return format_elapsed(float(remaining_count) / float(rate_per_second))
-
 
 
 def count_missing_results(results, requested_names, valid_coord=None, retryable_mask=None):
@@ -2323,7 +2288,6 @@ def count_missing_results(results, requested_names, valid_coord=None, retryable_
     return int(np.count_nonzero(missing_mask))
 
 
-
 def emit_progress_line(phase_label, completed, total, started_at, unit_name, extra=""):
     elapsed = time.time() - float(started_at)
     pct = 100.0 if total <= 0 else (100.0 * float(completed) / float(total))
@@ -2337,7 +2301,6 @@ def emit_progress_line(phase_label, completed, total, started_at, unit_name, ext
     print(msg, file=sys.stderr, flush=True)
 
 
-
 def make_progress_state(phase_label, total, unit_name, report_every_seconds=10.0, started_at=None):
     started_at = time.time() if started_at is None else float(started_at)
     return {
@@ -2349,7 +2312,6 @@ def make_progress_state(phase_label, total, unit_name, report_every_seconds=10.0
         "last_report_time": started_at,
         "last_report_completed": 0,
     }
-
 
 
 def maybe_emit_progress(progress_state, completed, extra="", force=False):
@@ -2376,7 +2338,6 @@ def maybe_emit_progress(progress_state, completed, extra="", force=False):
     )
     progress_state["last_report_time"] = now
     progress_state["last_report_completed"] = completed
-
 
 
 def main():
@@ -2515,7 +2476,7 @@ def main():
         "--fallback-radius-pixels",
         type=int,
         default=3,
-        help="If the exact sampled pixel is nodata, run a second-pass search outward for the nearest valid neighbor within this pixel radius, only for rows still missing after the exact pass",
+        help="If the sampled pixel is nodata, search outward immediately within this pixel radius while the current block group is still hot in cache",
     )
     ap.add_argument(
         "--progress-every-seconds",
@@ -2728,7 +2689,7 @@ def main():
 
         if max(0, args.fallback_radius_pixels) > 0:
             print(
-                f"Fallback enabled: exact first pass, then retry only missing rows within radius {max(0, args.fallback_radius_pixels)}",
+                f"Fallback enabled: inline neighbor search within radius {max(0, args.fallback_radius_pixels)} on the first pass",
                 file=sys.stderr,
             )
 
@@ -2765,10 +2726,9 @@ def main():
                 file=sys.stderr,
             )
 
-            retry_rows = 0
-            retry_filled = 0
 
-            exact_started = time.time()
+            sample_started = time.time()
+            fallback_radius_pixels = max(0, args.fallback_radius_pixels)
             results, retryable_mask = sample_chunk_results(
                 dataset_specs=dataset_specs,
                 crs_groups=crs_groups,
@@ -2780,7 +2740,7 @@ def main():
                 valid_coord=valid_coord,
                 gdal_cache_mb=args.gdal_cache_mb,
                 on_read_error=args.on_read_error,
-                fallback_radius_pixels=0,
+                fallback_radius_pixels=fallback_radius_pixels,
                 executor=executor,
                 error_state=error_state,
                 root=root,
@@ -2793,79 +2753,22 @@ def main():
                 local_transformer_cache=local_transformer_cache,
                 local_rowcol_cache=local_rowcol_cache,
                 repair_read_errors=args.repair_read_errors,
-                progress_label=f"chunk={chunk_idx} phase=exact",
+                progress_label=f"chunk={chunk_idx} phase=sample",
                 progress_every_datasets=args.progress_every_datasets,
                 progress_every_seconds=args.progress_every_seconds,
             )
-            exact_elapsed = time.time() - exact_started
-            missing_after_exact = count_missing_results(
+            sample_elapsed = time.time() - sample_started
+            remaining_missing_after_sample = count_missing_results(
                 results=results,
                 requested_names=requested_names,
                 valid_coord=valid_coord,
                 retryable_mask=retryable_mask,
             )
             print(
-                f"[chunk {chunk_idx}] exact done elapsed={format_elapsed(exact_elapsed)} "
-                f"rate={format_rate(n, exact_elapsed, 'rows')} missing_after_exact={missing_after_exact:,}",
+                f"[chunk {chunk_idx}] sample done elapsed={format_elapsed(sample_elapsed)} "
+                f"rate={format_rate(n, sample_elapsed, 'rows')} remaining_missing_after_sample={remaining_missing_after_sample:,}",
                 file=sys.stderr,
             )
-
-            fallback_radius_pixels = max(0, args.fallback_radius_pixels)
-            if fallback_radius_pixels > 0:
-                retry_idx = compute_retry_indices(
-                    results=results,
-                    requested_names=requested_names,
-                    valid_coord=valid_coord,
-                    retryable_mask=retryable_mask,
-                )
-                retry_rows = int(retry_idx.shape[0])
-
-                if retry_rows > 0:
-                    print(
-                        f"[chunk {chunk_idx}] retry start rows={retry_rows:,} radius={fallback_radius_pixels}",
-                        file=sys.stderr,
-                    )
-                    retry_started = time.time()
-                    retry_results, _ = sample_chunk_results(
-                        dataset_specs=dataset_specs,
-                        crs_groups=crs_groups,
-                        sampling_groups=sampling_groups,
-                        dataset_batches=dataset_batches,
-                        input_crs_text=input_crs_text,
-                        lon=lon[retry_idx],
-                        lat=lat[retry_idx],
-                        valid_coord=valid_coord[retry_idx],
-                        gdal_cache_mb=args.gdal_cache_mb,
-                        on_read_error=args.on_read_error,
-                        fallback_radius_pixels=fallback_radius_pixels,
-                        executor=executor,
-                        error_state=error_state,
-                        root=root,
-                        vrt_cache=vrt_cache,
-                        repair_state=repair_state,
-                        repair_backup_bad=args.repair_backup_bad,
-                        repair_retries=max(1, args.repair_retries),
-                        repair_timeout=max(1, args.repair_timeout),
-                        local_ds_cache=local_ds_cache,
-                        local_transformer_cache=local_transformer_cache,
-                        local_rowcol_cache=local_rowcol_cache,
-                        repair_read_errors=args.repair_read_errors,
-                        progress_label=f"chunk={chunk_idx} phase=retry",
-                        progress_every_datasets=args.progress_every_datasets,
-                        progress_every_seconds=args.progress_every_seconds,
-                    )
-                    retry_elapsed = time.time() - retry_started
-                    retry_filled = merge_retry_results(
-                        base_results=results,
-                        retry_results=retry_results,
-                        retry_idx=retry_idx,
-                        requested_names=requested_names,
-                    )
-                    print(
-                        f"[chunk {chunk_idx}] retry done elapsed={format_elapsed(retry_elapsed)} "
-                        f"rate={format_rate(retry_rows, retry_elapsed, 'rows')} retry_filled={retry_filled:,}",
-                        file=sys.stderr,
-                    )
 
             if writer is None:
                 output_fields = build_output_fields(
@@ -2928,7 +2831,7 @@ def main():
             )
             print(
                 f"[chunk {chunk_idx}] complete rows={n:,} total_rows={total_rows:,} "
-                f"retry_rows={retry_rows:,} retry_filled={retry_filled:,} remaining_missing={remaining_missing:,} "
+                f"remaining_missing={remaining_missing:,} "
                 f"chunk_elapsed={format_elapsed(time.time() - chunk_started)} "
                 f"overall_elapsed={format_elapsed(overall_elapsed)} "
                 f"overall_rate={format_rate(total_rows, overall_elapsed, 'rows')} "
