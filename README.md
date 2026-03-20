@@ -1,6 +1,11 @@
 # iNaturalist + global GIS species suitability mapping with eta-squared and XGBoost/ExtraTrees
 
-This software lets you make individual and combined suitability maps for any species captured in the iNaturalist dataset, by pulling a rich set of climate, geological, and topological data from other freely available datasets. This lets you map possible habitat ranges for plants, the idea being you may want to develop land with many kinds of species, e.g. for permaculture or industrial agroforestry. Initial results overlap well with known habitat, using well known Oregon species as our test case. Future results will show "agroforestry" profiles where we have valid overlap for dozens of useful cultivatable species, but we're still solving some memory performance problems for scaling to millions of points with these huge datasets as we're using a slow device. If you have a nice workstation with a very fast SSD you should not have a huge issue getting quicker results.
+This software lets you make individual and combined suitability maps for any species captured in the iNaturalist dataset, by pulling a rich set of climate, geological, and topological data from other freely available datasets. This lets you map possible habitat ranges for plants, the idea being you may want to develop land with many kinds of species, e.g. for permaculture or industrial agroforestry. 
+
+<img width="1480" height="396" alt="ChatGPT Image Mar 20, 2026, 01_46_45 AM" src="https://github.com/user-attachments/assets/60e4acde-96b5-4607-9c38-07bd36599930" />
+
+
+Initial results overlap well with known habitat, using well known Oregon species as our test case. Future results will show "agroforestry" profiles where we have valid overlap for dozens of useful cultivatable species, but we're still solving some memory performance problems for scaling to millions of points with these huge datasets as we're using a slow device. If you have a nice workstation with a very fast SSD you should not have a huge issue getting quicker results.
 
 This project requires ~1 TB of data to run yourself:
 - bulk global iNaturalist species occurrences via GBIF.org
