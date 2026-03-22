@@ -26,6 +26,8 @@ except Exception:
 # Isolated species from larger dataset
 #  py build_suitability_maps.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/suitability_maps_madrone --group-by matched_species_name --stress-strength 4 --stress-power 4 --stress-grace-frac 0 --include-taxa "species:Arbutus menziesii,species:Kopsiopsis strobilacea"
 
+# py build_suitability_maps.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/suitability_maps_all_but_excluded --group-by matched_species_name --exclude-taxa "species:Acer rubrum" "species:Pseudotsuga menziesii" "species:Epifagus virginiana" "species:Fagus grandifolia" "species:Alnus rubra" "species:Kopsiopsis strobilacea" "species:Arbutus menziesii" --stress-strength 4 --stress-power 4 --stress-grace-frac 0 --stress-extreme-multiplier 1.25 
+
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MONTH_NUMBERS = [f"{i:02d}" for i in range(1, 13)]
 TERRACLIMATE_MONTHLY_RX = re.compile(r"^(terraclimate_[^_]+?)(?:_(\d{4}))?_m(0[1-9]|1[0-2])$")
@@ -857,6 +859,7 @@ def one_sided_stress_modifier(
     stress_power: float = 1.0,
     stress_strength: float = 0.45,
     stress_grace_frac: float = 0.15,
+    stress_extreme_multiplier: float = 1.25,
 ) -> np.ndarray:
     x = np.asarray(values, dtype=float)
     out = np.full(x.shape, np.nan, dtype=np.float32)
@@ -878,27 +881,30 @@ def one_sided_stress_modifier(
     span = max(hi2 - lo2, 1e-12)
     grace = max(0.0, float(stress_grace_frac)) * span
     strength = float(np.clip(stress_strength, 0.0, 1.0))
+    extreme_multiplier = max(1.0, float(stress_extreme_multiplier))
 
     if direction == "high":
         start = min(hi2, q75_2 + grace)
         stressed = xv > start
         if np.any(stressed):
             denom = max(hi2 - start, max(0.10 * span, 1e-12))
-            frac = (xv[stressed] - start) / denom
+            frac = extreme_multiplier * ((xv[stressed] - start) / denom)
             frac = np.clip(frac, 0.0, 1.0)
             raw_penalty = np.power(1.0 - frac, max(0.05, float(stress_power))).astype(np.float32)
             score[stressed] = (1.0 - strength * (1.0 - raw_penalty)).astype(np.float32)
-        score[xv >= hi2] = np.float32(max(0.0, 1.0 - strength))
+        projected_edge = start + (hi2 - start) / extreme_multiplier
+        score[xv >= projected_edge] = np.float32(max(0.0, 1.0 - strength))
     else:
         start = max(lo2, q25_2 - grace)
         stressed = xv < start
         if np.any(stressed):
             denom = max(start - lo2, max(0.10 * span, 1e-12))
-            frac = (start - xv[stressed]) / denom
+            frac = extreme_multiplier * ((start - xv[stressed]) / denom)
             frac = np.clip(frac, 0.0, 1.0)
             raw_penalty = np.power(1.0 - frac, max(0.05, float(stress_power))).astype(np.float32)
             score[stressed] = (1.0 - strength * (1.0 - raw_penalty)).astype(np.float32)
-        score[xv <= lo2] = np.float32(max(0.0, 1.0 - strength))
+        projected_edge = start - (start - lo2) / extreme_multiplier
+        score[xv <= projected_edge] = np.float32(max(0.0, 1.0 - strength))
     out[valid] = np.clip(score, max(0.0, 1.0 - strength), 1.0)
     return out
 
@@ -988,6 +994,16 @@ def combine_numeric_and_categorical(
     return np.clip(result, 0.0, 1.0)
 
 
+def apply_minimum_suitability_threshold(values: np.ndarray, threshold: float) -> np.ndarray:
+    out = np.asarray(values, dtype=np.float32).copy()
+    thr = pd.to_numeric(threshold, errors="coerce")
+    if pd.isna(thr) or float(thr) <= 0.0:
+        return out
+    valid = np.isfinite(out)
+    out[valid & (out < float(thr))] = 0.0
+    return out
+
+
 def score_group_components_on_chunk(
     chunk: pd.DataFrame,
     model: GroupModel,
@@ -995,6 +1011,7 @@ def score_group_components_on_chunk(
     stress_power: float,
     stress_strength: float,
     stress_grace_frac: float,
+    stress_extreme_multiplier: float,
     novelty_scale: float,
     score_sharpness: float,
     score_floor: float,
@@ -1051,7 +1068,7 @@ def score_group_components_on_chunk(
             if feat.column not in chunk.columns:
                 continue
             vals = pd.to_numeric(chunk[feat.column], errors="coerce").to_numpy(dtype=float, copy=False)
-            scores = one_sided_stress_modifier(vals, feat.direction, feat.min_v, feat.q25, feat.q75, feat.max_v, stress_power, stress_strength, stress_grace_frac)
+            scores = one_sided_stress_modifier(vals, feat.direction, feat.min_v, feat.q25, feat.q75, feat.max_v, stress_power, stress_strength, stress_grace_frac, stress_extreme_multiplier)
             valid = np.isfinite(scores)
             w = float(feat.weight)
             if w <= 0:
@@ -1445,12 +1462,14 @@ def main() -> int:
     ap.add_argument("--max-groups", type=int, default=0, help="Optional maximum number of selected groups to keep after filtering; 0 keeps all")
     ap.add_argument("--categorical-share", type=float, default=0.15, help="Final core score share reserved for categorical features")
     ap.add_argument("--richness-threshold", type=float, default=0.75, help="Threshold used for richness counting and for interpreting cells as likely enough to count")
+    ap.add_argument("--minimum-suitability-threshold", type=float, default=0.0, help="Set adjusted suitability values below this threshold to 0 before writing outputs and building aggregates; <= 0 disables")
     ap.add_argument("--family-reliability-priors", default="terraclimate=1.0,dem=0.95,twi=0.9,soilgrids=0.75,glim=0.8,mcd12q1=0.6,other=0.8")
     ap.add_argument("--redundancy-top-k", type=int, default=5, help="Top K overlap neighbors used for redundancy penalty")
     ap.add_argument("--hist-bins", type=int, default=512, help="Histogram bins used for within-species score standardization")
     ap.add_argument("--stress-power", type=float, default=1.0, help="Exponent controlling how quickly one-sided stress penalties decline")
     ap.add_argument("--stress-strength", type=float, default=0.45, help="Maximum share of suitability removed by the generalized stress modifier at the most extreme observed edge")
     ap.add_argument("--stress-grace-frac", type=float, default=0.15, help="Fraction of the observed feature span added beyond q25 or q75 before stress penalties begin")
+    ap.add_argument("--stress-extreme-multiplier", type=float, default=1.25, help="Projects stressed departures beyond the observed stress edge before converting them to penalties; 1.25 treats departures as 25 percent more extreme, which helps when climate inputs reflect only a limited recent window")
     ap.add_argument("--novelty-scale", type=float, default=1.0, help="Scale factor controlling how quickly reliability declines outside observed support")
     ap.add_argument("--score-sharpness", type=float, default=2.0, help="Exponent applied to per-feature similarity before geometric aggregation; values above 1 make middling fits fall faster")
     ap.add_argument("--score-floor", type=float, default=0.02, help="Minimum transformed per-feature similarity retained during geometric aggregation so one weak feature penalizes strongly without zeroing the whole score")
@@ -1676,6 +1695,7 @@ def main() -> int:
                 stress_power=args.stress_power,
                 stress_strength=args.stress_strength,
                 stress_grace_frac=args.stress_grace_frac,
+                stress_extreme_multiplier=args.stress_extreme_multiplier,
                 novelty_scale=args.novelty_scale,
                 score_sharpness=args.score_sharpness,
                 score_floor=args.score_floor,
@@ -1685,7 +1705,7 @@ def main() -> int:
                 use_reliability_adjustment=not args.no_reliability_adjustment,
             )
             g = model.group
-            adjusted = comps["adjusted"]
+            adjusted = apply_minimum_suitability_threshold(comps["adjusted"], args.minimum_suitability_threshold)
             core = comps["core"]
             rel = comps["reliability"]
             rel_factor = comps["reliability_factor"]
@@ -1812,6 +1832,7 @@ def main() -> int:
                 stress_power=args.stress_power,
                 stress_strength=args.stress_strength,
                 stress_grace_frac=args.stress_grace_frac,
+                stress_extreme_multiplier=args.stress_extreme_multiplier,
                 novelty_scale=args.novelty_scale,
                 score_sharpness=args.score_sharpness,
                 score_floor=args.score_floor,
@@ -1820,7 +1841,7 @@ def main() -> int:
                 use_stress_adjustment=not args.no_stress_adjustment,
                 use_reliability_adjustment=not args.no_reliability_adjustment,
             )
-            adjusted = comps["adjusted"]
+            adjusted = apply_minimum_suitability_threshold(comps["adjusted"], args.minimum_suitability_threshold)
             core = comps["core"]
             reliability = comps["reliability"]
             centers, cdf = cdf_lookup[model.group]
@@ -2007,6 +2028,7 @@ def main() -> int:
         "aggregate_ranks": [str(x).lower() for x in (args.aggregate_ranks or [])],
         "categorical_share": float(args.categorical_share),
         "richness_threshold": float(args.richness_threshold),
+        "minimum_suitability_threshold": float(args.minimum_suitability_threshold),
         "grid_chunk_size": int(args.grid_chunk_size),
         "min_feature_n_valid": int(args.min_feature_n_valid),
         "min_features_per_group": int(args.min_features_per_group),
@@ -2015,6 +2037,9 @@ def main() -> int:
         "redundancy_top_k": int(args.redundancy_top_k),
         "hist_bins": int(hist_bins),
         "stress_power": float(args.stress_power),
+        "stress_strength": float(args.stress_strength),
+        "stress_grace_frac": float(args.stress_grace_frac),
+        "stress_extreme_multiplier": float(args.stress_extreme_multiplier),
         "novelty_scale": float(args.novelty_scale),
         "score_sharpness": float(args.score_sharpness),
         "score_floor": float(args.score_floor),
