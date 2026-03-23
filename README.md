@@ -28,20 +28,32 @@ Look at iNaturalistOccurrences and Suitability folders for how to start processi
 Note our results are using an "artist's touch" to manually adjust eta-squared priors and manually control the blending between the ML and eta-squared results. The actual realism is species-dependent and requires more survey data, but this is already a great result running on fairly naive assumptions.
 
 Blending eta-squared with the classifier probabilites gives the most convincing results, e.g. the deserts truly are not suitable for most of the plants here:
-<img width="1604" height="1419" alt="image" src="https://github.com/user-attachments/assets/a2f28052-5202-47d8-b2c2-9e6996bbac0a" />
+<img width="1137" height="1012" alt="image" src="https://github.com/user-attachments/assets/6816995d-2600-44ff-be60-2e00ef9c9e87" />
+
 
 Eta-squared style empirically-weighted suitability scoring, with stress and reliability modifiers, compared to actual habitat ranges. We next added a machine learning habitat classifier to blend with this.
-<img width="1780" height="1454" alt="image" src="https://github.com/user-attachments/assets/9f915fe0-b86c-4b35-84fe-7b45877b27c5" />
-<img width="1371" height="730" alt="image" src="https://github.com/user-attachments/assets/fb658554-135e-4227-a258-1bc02b052ac4" />
-<img width="1545" height="734" alt="image" src="https://github.com/user-attachments/assets/a567d6eb-4c36-4465-b8ea-25f9bc63e627" />
-<img width="1617" height="1483" alt="image" src="https://github.com/user-attachments/assets/f5ffb234-2621-4ec4-8c5d-d616468f58f1" />
+<img width="1212" height="1025" alt="image" src="https://github.com/user-attachments/assets/2a9eddec-1c83-4bff-b71b-677252ba565f" />
+<img width="1181" height="694" alt="image" src="https://github.com/user-attachments/assets/0b814f00-8ee7-436e-a09c-4569dcf2a61a" />
+<img width="1782" height="847" alt="image" src="https://github.com/user-attachments/assets/54db69d9-c9dc-46a9-8ff8-dca0417cbcec" />
+<img width="1163" height="1054" alt="image" src="https://github.com/user-attachments/assets/9561495c-bc84-4e52-8c08-c7f936a84bf3" />
+
+Extrapolated model:
+<img width="2045" height="705" alt="image" src="https://github.com/user-attachments/assets/a7f5a682-7fae-4b4b-b336-9fd084e05797" /> The low F1 scores here are more due to the extrapolating rather than the original classification accuracy, as we deliberaly are weakening it to get a larger suitability area.
+
+Leaky XGBoost model that overtunes around the actual observation sites (minus coordinates), useful for blending better from occurrence data ground truth:
+<img width="1427" height="1199" alt="image" src="https://github.com/user-attachments/assets/58a74726-afba-4077-99be-d16c0081e4fa" /> This was our first attempt but it didn't do background sampling correctly.
+
+Leaky model (overtunes around observation sites):
 <img width="2010" height="696" alt="image" src="https://github.com/user-attachments/assets/82be1162-5cb6-4fb0-93cc-ecffe6ece130" />
+
+We also created a community model on top of this to look at multi-species probabilities, we are still testing it.
 
 Initial results overlap well with known habitat, using well known Oregon species as our test case. Future results will show "agroforestry" profiles where we have valid overlap for dozens of useful cultivatable species, but we're still solving some memory performance problems for scaling to millions of points with these huge datasets as we're using a slow device. If you have a nice workstation with a very fast SSD you should not have a huge issue getting quicker results.
 
 
 XGBoost/ExtraTrees result
-<img width="1635" height="1386" alt="image" src="https://github.com/user-attachments/assets/a58fbfad-7147-4e72-a31d-62e9f050030c" />
+<img width="1172" height="975" alt="image" src="https://github.com/user-attachments/assets/bc5d7070-f24d-4e75-904d-b0977ef64162" />
+
 
 Numeric comparisons:
 <img width="1757" height="1635" alt="image" src="https://github.com/user-attachments/assets/c8688028-c6a7-4213-9ff6-aefee6378fca" />
