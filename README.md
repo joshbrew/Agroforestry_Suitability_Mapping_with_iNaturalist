@@ -37,7 +37,7 @@ Eta-squared style empirically-weighted suitability scoring, with stress and reli
 <img width="1782" height="847" alt="image" src="https://github.com/user-attachments/assets/54db69d9-c9dc-46a9-8ff8-dca0417cbcec" />
 <img width="1163" height="1054" alt="image" src="https://github.com/user-attachments/assets/9561495c-bc84-4e52-8c08-c7f936a84bf3" />
 
-Initial results overlap well with known habitat, using well known Oregon species as our test case. Future results will show "agroforestry" profiles where we have valid overlap for dozens of useful cultivatable species, but we're still solving some memory performance problems for scaling to millions of points with these huge datasets as we're using a slow device. If you have a nice workstation with a very fast SSD you should not have a huge issue getting quicker results.
+Initial results overlap well with known habitat, using well known Oregon species as our test case. Future results will show "agroforestry" profiles where we have valid overlap for dozens of useful cultivatable species.
 
 
 XGBoost/ExtraTrees result
