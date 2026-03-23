@@ -37,22 +37,22 @@ Eta-squared style empirically-weighted suitability scoring, with stress and reli
 <img width="1782" height="847" alt="image" src="https://github.com/user-attachments/assets/54db69d9-c9dc-46a9-8ff8-dca0417cbcec" />
 <img width="1163" height="1054" alt="image" src="https://github.com/user-attachments/assets/9561495c-bc84-4e52-8c08-c7f936a84bf3" />
 
-Extrapolated model:
-<img width="2045" height="705" alt="image" src="https://github.com/user-attachments/assets/a7f5a682-7fae-4b4b-b336-9fd084e05797" /> The low F1 scores here are more due to the extrapolating rather than the original classification accuracy, as we deliberaly are weakening it to get a larger suitability area.
-
-Leaky XGBoost model that overtunes around the actual observation sites (minus coordinates), useful for blending better from occurrence data ground truth:
-<img width="1427" height="1199" alt="image" src="https://github.com/user-attachments/assets/58a74726-afba-4077-99be-d16c0081e4fa" /> This was our first attempt but it didn't do background sampling correctly.
-
-Leaky model (overtunes around observation sites):
-<img width="2010" height="696" alt="image" src="https://github.com/user-attachments/assets/82be1162-5cb6-4fb0-93cc-ecffe6ece130" />
-
-We also created a community model on top of this to look at multi-species probabilities, we are still testing it.
-
 Initial results overlap well with known habitat, using well known Oregon species as our test case. Future results will show "agroforestry" profiles where we have valid overlap for dozens of useful cultivatable species, but we're still solving some memory performance problems for scaling to millions of points with these huge datasets as we're using a slow device. If you have a nice workstation with a very fast SSD you should not have a huge issue getting quicker results.
 
 
 XGBoost/ExtraTrees result
 <img width="1172" height="975" alt="image" src="https://github.com/user-attachments/assets/bc5d7070-f24d-4e75-904d-b0977ef64162" />
+
+Model performance:
+<img width="2045" height="705" alt="image" src="https://github.com/user-attachments/assets/a7f5a682-7fae-4b4b-b336-9fd084e05797" /> The low F1 scores here are more due to the extrapolating rather than the original classification accuracy, as we deliberaly are weakening it to get a larger suitability area.
+
+Leaky XGBoost model that overtunes around the actual observation sites (minus coordinates), useful for blending better from occurrence data ground truth:
+<img width="1427" height="1199" alt="image" src="https://github.com/user-attachments/assets/58a74726-afba-4077-99be-d16c0081e4fa" /> This was our first attempt but it didn't do background sampling correctly.
+
+Leaky model (overtunes around observation sites), very high F1 due to less extrapolation:
+<img width="2010" height="696" alt="image" src="https://github.com/user-attachments/assets/82be1162-5cb6-4fb0-93cc-ecffe6ece130" />
+
+We also created a community model on top of this to look at multi-species probabilities, we are still testing it.
 
 
 Numeric comparisons:
