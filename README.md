@@ -47,7 +47,7 @@ Model performance:
 <img width="2045" height="705" alt="image" src="https://github.com/user-attachments/assets/a7f5a682-7fae-4b4b-b336-9fd084e05797" /> The low F1 scores here are more due to the extrapolating rather than the original classification accuracy, as we deliberaly are weakening it to get a larger suitability area.
 
 Leaky XGBoost model that overtunes around the actual observation sites (minus coordinates), useful for blending better from occurrence data ground truth:
-<img width="1427" height="1199" alt="image" src="https://github.com/user-attachments/assets/58a74726-afba-4077-99be-d16c0081e4fa" /> This was our first attempt but it didn't do background sampling correctly.
+<img width="1427" height="1199" alt="image" src="https://github.com/user-attachments/assets/58a74726-afba-4077-99be-d16c0081e4fa" /> This was our first attempt but it didn't do background sampling correctly, however it still has some usefulness as a narrower model.
 
 Leaky model (overtunes around observation sites), very high F1 due to less extrapolation:
 <img width="2010" height="696" alt="image" src="https://github.com/user-attachments/assets/82be1162-5cb6-4fb0-93cc-ecffe6ece130" />
