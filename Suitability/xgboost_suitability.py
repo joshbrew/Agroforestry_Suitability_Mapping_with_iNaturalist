@@ -34,8 +34,8 @@ except Exception:
     HAVE_XGBOOST = False
 
 
-# py xgboost_suitability_final_reviewed.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/ml_association_test_final_reviewed --group-by matched_species_name --background-source target_group --cv-block-size 1.0 --cv-buffer-blocks 1
-# py xgboost_suitability_final_reviewed.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/ml_association_test_final_reviewed_all_but_excluded --group-by matched_species_name --background-source target_group --cv-block-size 1.0 --cv-buffer-blocks 1 --exclude-taxa "species:Acer rubrum" "species:Pseudotsuga menziesii" "species:Epifagus virginiana" "species:Fagus grandifolia" "species:Alnus rubra" "species:Kopsiopsis strobilacea" "species:Arbutus menziesii"
+# py xgboost_suitability.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/ml_association_test_conservative_final --group-by matched_species_name --background-source mixed --background-sampling regional --cv-block-size 1.0 --cv-buffer-blocks 1
+# py xgboost_suitability.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/ml_association_test_conservative_final_all_but_excluded --group-by matched_species_name --background-source mixed --background-sampling regional --cv-block-size 1.0 --cv-buffer-blocks 1 --exclude-taxa "species:Acer rubrum" "species:Pseudotsuga menziesii" "species:Epifagus virginiana" "species:Fagus grandifolia" "species:Alnus rubra" "species:Kopsiopsis strobilacea" "species:Arbutus menziesii"
 
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MONTH_NUMBERS = [f"{i:02d}" for i in range(1, 13)]
@@ -1009,13 +1009,18 @@ def _coarsen_regular_grid(grid: np.ndarray, x_edges: np.ndarray, y_edges: np.nda
     return coarse, x_edges2, y_edges2
 
 
-def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Path, x_col: str, y_col: str, point_alpha: float, preview_coarsen: int, vmax: Optional[float]) -> None:
+def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Path, x_col: str, y_col: str, point_alpha: float, preview_coarsen: int, vmax: Optional[float], minimum_score_threshold: Optional[float] = None) -> None:
     if plt is None or value_col not in df.columns:
         return
     sub = df[[x_col, y_col, value_col]].copy()
     sub[x_col] = pd.to_numeric(sub[x_col], errors='coerce')
     sub[y_col] = pd.to_numeric(sub[y_col], errors='coerce')
     sub[value_col] = pd.to_numeric(sub[value_col], errors='coerce')
+    thr = pd.to_numeric(minimum_score_threshold, errors='coerce')
+    if not pd.isna(thr) and float(thr) > 0:
+        mask = np.isfinite(sub[value_col].to_numpy(dtype=np.float32, copy=False)) & (sub[value_col].to_numpy(dtype=np.float32, copy=False) < float(thr))
+        if np.any(mask):
+            sub.loc[mask, value_col] = 0.0
     sub = sub.dropna(subset=[x_col, y_col, value_col])
     if sub.empty:
         return
@@ -1049,6 +1054,110 @@ def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Pa
     plt.close(fig)
 
 
+
+def generate_previews_from_existing_outputs(outdir: Path, args) -> None:
+    if plt is None:
+        log('[previews] matplotlib not available; skipping previews')
+        return
+    outdir = Path(outdir)
+    previews_root = outdir / 'previews'
+    previews_root.mkdir(parents=True, exist_ok=True)
+
+    overall_path = outdir / 'overall_suitability.csv'
+    if overall_path.exists():
+        try:
+            overall_df = pd.read_csv(
+                overall_path,
+                usecols=[
+                    args.x_col,
+                    args.y_col,
+                    'overall_ml',
+                    'overall_ml_min',
+                    'overall_ml_joint',
+                    'richness_ml',
+                ],
+                low_memory=False,
+            )
+        except Exception:
+            overall_df = pd.DataFrame()
+        if not overall_df.empty:
+            preview_point_map(overall_df, 'overall_ml', 'overall ML suitability', previews_root / 'overall_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_ml_min', 'overall ML minimum overlap', previews_root / 'overall_ml_min.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_ml_joint', 'overall ML joint suitability', previews_root / 'overall_ml_joint.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'richness_ml', 'richness above species thresholds', previews_root / 'richness_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+
+    community_overall_path = outdir / 'community_model' / 'community_overall.csv'
+    if community_overall_path.exists():
+        try:
+            community_df = pd.read_csv(
+                community_overall_path,
+                usecols=[
+                    args.x_col,
+                    args.y_col,
+                    'community_top_score',
+                    'community_top_gap',
+                    'community_effective_richness',
+                    'community_richness_above_threshold',
+                ],
+                low_memory=False,
+            )
+        except Exception:
+            community_df = pd.DataFrame()
+        if not community_df.empty:
+            community_previews = previews_root / 'community'
+            community_previews.mkdir(parents=True, exist_ok=True)
+            preview_point_map(community_df, 'community_top_score', 'community top-species share', community_previews / 'community_top_score.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(community_df, 'community_top_gap', 'community top-vs-second gap', community_previews / 'community_top_gap.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(community_df, 'community_effective_richness', 'community effective richness', community_previews / 'community_effective_richness.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+            preview_point_map(community_df, 'community_richness_above_threshold', 'community richness above class thresholds', community_previews / 'community_richness_above_threshold.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+
+    if int(args.preview_top_n) <= 0:
+        return
+
+    by_species_dir = outdir / 'by_species'
+    if not by_species_dir.exists():
+        return
+
+    ranking_path = outdir / 'species_score_summary.csv'
+    groups = []
+    if ranking_path.exists():
+        try:
+            ranking = pd.read_csv(ranking_path, low_memory=False)
+            if 'group' in ranking.columns:
+                groups = ranking['group'].astype(str).tolist()
+        except Exception:
+            groups = []
+    if not groups:
+        groups = sorted([p.stem for p in by_species_dir.glob('*.csv')])
+
+    limit = int(args.preview_top_n)
+    groups = groups[:limit] if limit > 0 else groups
+    if groups:
+        pd.DataFrame({'group': groups}).to_csv(outdir / 'species_preview_ranking.csv', index=False)
+
+    out_base = previews_root / 'by_species'
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    for group in groups:
+        src = by_species_dir / f"{safe_slug(group)}.csv"
+        if not src.exists():
+            alt = by_species_dir / f"{group}.csv"
+            if alt.exists():
+                src = alt
+            else:
+                continue
+        value_col = None
+        for candidate in ('ml_probability', 'ml_suitability'):
+            try:
+                dfp = pd.read_csv(src, usecols=[args.x_col, args.y_col, candidate], low_memory=False)
+                value_col = candidate
+                break
+            except Exception:
+                dfp = pd.DataFrame()
+        if value_col is None or dfp.empty:
+            continue
+        preview_point_map(dfp, value_col, f'{group} ML suitability', out_base / f"{safe_slug(group)}_ml.png", args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+
 def write_manifest(path: Path, payload: Dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
@@ -1063,12 +1172,579 @@ def predict_in_chunks(model, X: pd.DataFrame, chunk_size: int) -> np.ndarray:
     return out
 
 
+def build_feature_importance_lookup(final_model, perm_df: pd.DataFrame, feature_priority: Dict[str, float]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    if perm_df is not None and not perm_df.empty:
+        for row in perm_df.itertuples(index=False):
+            feature = str(getattr(row, 'feature', '') or '')
+            if not feature:
+                continue
+            value = pd.to_numeric(getattr(row, 'perm_importance_mean', np.nan), errors='coerce')
+            if pd.notna(value):
+                out[feature] = max(0.0, float(value))
+    model_importances = getattr(final_model, 'feature_importances_', None)
+    if model_importances is not None and perm_df is not None and not perm_df.empty:
+        for feature, value in zip(perm_df['feature'].astype(str).tolist(), np.asarray(model_importances, dtype=float)):
+            out[feature] = max(float(out.get(feature, 0.0)), max(0.0, float(value)))
+    for feature, value in (feature_priority or {}).items():
+        feature = str(feature)
+        out.setdefault(feature, max(0.0, float(value)))
+    return out
+
+
+def build_conservative_suitability_spec(pos_features: pd.DataFrame, final_feature_columns: Sequence[str], numeric_feature_names: Sequence[str], feature_importance: Dict[str, float], args) -> Dict[str, object]:
+    numeric_set = {str(c) for c in numeric_feature_names}
+    ranked = []
+    for col in final_feature_columns:
+        col = str(col)
+        if col not in numeric_set:
+            continue
+        base = col.split('__', 1)[0]
+        weight = max(0.0, float(feature_importance.get(col, feature_importance.get(base, 0.0))))
+        ranked.append((weight, col))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    max_features = max(0, int(getattr(args, 'deployment_center_top_features', 24)))
+    if max_features > 0:
+        ranked = ranked[:max_features]
+
+    q_low = float(np.clip(float(getattr(args, 'deployment_center_low_quantile', 0.10)), 0.0, 0.49))
+    q_high = float(np.clip(float(getattr(args, 'deployment_center_high_quantile', 0.90)), 0.51, 1.0))
+    if q_high <= q_low:
+        q_low, q_high = 0.10, 0.90
+
+    features = []
+    for weight, col in ranked:
+        vals = pd.to_numeric(pos_features[col], errors='coerce').to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size < 8:
+            continue
+        ql, q25, q50, q75, qh = np.nanquantile(vals, [q_low, 0.25, 0.50, 0.75, q_high])
+        spread = max(float(qh - ql), float(q75 - q25), float(np.nanstd(vals)), 1e-6)
+        center_scale = max(float(q75 - q25) * float(getattr(args, 'deployment_center_iqr_multiplier', 1.5)), spread * 0.35, 1e-6)
+        support_pad = spread * float(getattr(args, 'deployment_support_pad_fraction', 0.15))
+        features.append({
+            'column': col,
+            'weight': max(weight, 1e-8),
+            'center': float(q50),
+            'center_scale': float(center_scale),
+            'support_low': float(ql - support_pad),
+            'support_high': float(qh + support_pad),
+            'support_scale': float(max(spread, 1e-6)),
+            'q_low': float(ql),
+            'q_high': float(qh),
+        })
+    if not features:
+        return {
+            'features': [],
+            'raw_power': float(getattr(args, 'deployment_raw_power', 1.1)),
+            'center_floor': float(getattr(args, 'deployment_center_floor', 0.4)),
+            'center_power': float(getattr(args, 'deployment_center_power', 1.25)),
+            'center_distance_power': float(getattr(args, 'deployment_center_distance_power', 1.6)),
+            'novelty_strength': float(getattr(args, 'deployment_novelty_strength', 1.75)),
+            'novelty_floor': float(getattr(args, 'deployment_novelty_floor', 0.08)),
+        }
+    weights = np.asarray([max(float(item['weight']), 0.0) for item in features], dtype=float)
+    if not np.any(weights > 0):
+        weights = np.ones(len(features), dtype=float)
+    weights = weights / np.sum(weights)
+    for item, weight in zip(features, weights):
+        item['weight_norm'] = float(weight)
+    return {
+        'features': features,
+        'raw_power': float(getattr(args, 'deployment_raw_power', 1.1)),
+        'center_floor': float(np.clip(float(getattr(args, 'deployment_center_floor', 0.4)), 0.0, 1.0)),
+        'center_power': float(max(0.1, float(getattr(args, 'deployment_center_power', 1.25)))),
+        'center_distance_power': float(max(0.1, float(getattr(args, 'deployment_center_distance_power', 1.6)))),
+        'novelty_strength': float(max(0.0, float(getattr(args, 'deployment_novelty_strength', 1.75)))),
+        'novelty_floor': float(np.clip(float(getattr(args, 'deployment_novelty_floor', 0.08)), 0.0, 1.0)),
+    }
+
+
+def apply_conservative_suitability_spec(X_features: pd.DataFrame, raw_scores: np.ndarray, conservative_spec: Dict[str, object]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    raw = np.asarray(raw_scores, dtype=np.float32)
+    n = len(raw)
+    raw_valid = np.isfinite(raw)
+    if not conservative_spec or not conservative_spec.get('features'):
+        ones = np.where(raw_valid, 1.0, np.nan).astype(np.float32)
+        return raw.copy(), ones, ones, ones
+
+    center_acc = np.zeros(n, dtype=np.float64)
+    novelty_acc = np.zeros(n, dtype=np.float64)
+    weight_acc = np.zeros(n, dtype=np.float64)
+    center_distance_power = float(conservative_spec.get('center_distance_power', 1.6))
+    for feat in conservative_spec['features']:
+        col = str(feat['column'])
+        if col not in X_features.columns:
+            continue
+        vals = pd.to_numeric(X_features[col], errors='coerce').to_numpy(dtype=float)
+        valid = np.isfinite(vals)
+        if not np.any(valid):
+            continue
+        weight = float(feat.get('weight_norm', 0.0))
+        if weight <= 0:
+            continue
+        dist = np.zeros(n, dtype=np.float64)
+        dist[valid] = np.abs(vals[valid] - float(feat['center'])) / max(float(feat['center_scale']), 1e-6)
+        center_score = np.zeros(n, dtype=np.float64)
+        center_score[valid] = 1.0 / (1.0 + np.power(dist[valid], center_distance_power))
+
+        outside = np.zeros(n, dtype=np.float64)
+        low = float(feat['support_low'])
+        high = float(feat['support_high'])
+        support_scale = max(float(feat['support_scale']), 1e-6)
+        low_mask = valid & (vals < low)
+        high_mask = valid & (vals > high)
+        outside[low_mask] = (low - vals[low_mask]) / support_scale
+        outside[high_mask] = (vals[high_mask] - high) / support_scale
+        outside = np.clip(outside, 0.0, 6.0)
+
+        center_acc[valid] += weight * center_score[valid]
+        novelty_acc[valid] += weight * outside[valid]
+        weight_acc[valid] += weight
+
+    center_core = np.full(n, np.nan, dtype=np.float64)
+    novelty_core = np.full(n, np.nan, dtype=np.float64)
+    good = weight_acc > 0
+    center_core[good] = np.clip(center_acc[good] / weight_acc[good], 0.0, 1.0)
+    novelty_core[good] = np.exp(-float(conservative_spec.get('novelty_strength', 1.75)) * (novelty_acc[good] / weight_acc[good]))
+
+    center_floor = float(conservative_spec.get('center_floor', 0.4))
+    center_power = float(conservative_spec.get('center_power', 1.25))
+    novelty_floor = float(conservative_spec.get('novelty_floor', 0.08))
+    center_weight = np.full(n, np.nan, dtype=np.float64)
+    novelty_penalty = np.full(n, np.nan, dtype=np.float64)
+    center_weight[good] = center_floor + (1.0 - center_floor) * np.power(center_core[good], center_power)
+    novelty_penalty[good] = novelty_floor + (1.0 - novelty_floor) * np.clip(novelty_core[good], 0.0, 1.0)
+
+    conservative = np.full(n, np.nan, dtype=np.float64)
+    adjustment_factor = np.full(n, np.nan, dtype=np.float64)
+    adjustment_factor[good] = np.clip(center_weight[good] * novelty_penalty[good], 0.0, 1.0)
+    conservative[good & raw_valid] = np.power(np.clip(raw[good & raw_valid], 0.0, 1.0), float(conservative_spec.get('raw_power', 1.1))) * adjustment_factor[good & raw_valid]
+    conservative = np.clip(conservative, 0.0, 1.0)
+    conservative[~raw_valid] = np.nan
+    center_weight[~raw_valid] = np.nan
+    novelty_penalty[~raw_valid] = np.nan
+    adjustment_factor[~raw_valid] = np.nan
+    return conservative.astype(np.float32), center_weight.astype(np.float32), novelty_penalty.astype(np.float32), adjustment_factor.astype(np.float32)
+
+
+
+def build_multiclass_cv_splitter(y: np.ndarray, coords_x: np.ndarray, coords_y: np.ndarray, desired_folds: int, block_size: float, random_state: int):
+    y_arr = np.asarray(y, dtype=np.int32)
+    _, class_counts = np.unique(y_arr, return_counts=True)
+    min_class = int(class_counts.min()) if class_counts.size else 0
+    finite_coords = np.isfinite(coords_x).all() and np.isfinite(coords_y).all()
+    if finite_coords:
+        groups = build_spatial_groups(coords_x, coords_y, block_size)
+        unique_groups = np.unique(groups)
+        n_splits = min(int(desired_folds), int(unique_groups.size))
+        if n_splits >= 2:
+            return GroupKFold(n_splits=n_splits), groups, 'groupkfold'
+    n_splits = min(int(desired_folds), max(0, min_class))
+    if n_splits >= 2:
+        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=int(random_state)), None, 'stratified'
+    return None, None, 'none'
+
+
+def multiclass_topk_accuracy(y_true: np.ndarray, proba: np.ndarray, k: int) -> float:
+    y = np.asarray(y_true, dtype=np.int32)
+    p = np.asarray(proba, dtype=float)
+    if y.size == 0 or p.ndim != 2 or p.shape[0] != y.size:
+        return float('nan')
+    valid = np.isfinite(p).all(axis=1)
+    if not np.any(valid):
+        return float('nan')
+    y = y[valid]
+    p = p[valid]
+    kk = max(1, min(int(k), int(p.shape[1])))
+    top_idx = np.argpartition(-p, kth=kk - 1, axis=1)[:, :kk]
+    hits = np.any(top_idx == y[:, None], axis=1)
+    return float(np.mean(hits)) if hits.size else float('nan')
+
+
+def compute_multiclass_class_weights(y: np.ndarray) -> np.ndarray:
+    y_arr = np.asarray(y, dtype=np.int32)
+    if y_arr.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    classes, counts = np.unique(y_arr, return_counts=True)
+    total = float(y_arr.size)
+    n_classes = max(1, len(classes))
+    lookup = {int(cls): total / (n_classes * max(1, int(cnt))) for cls, cnt in zip(classes, counts)}
+    return np.asarray([lookup.get(int(cls), 1.0) for cls in y_arr], dtype=np.float32)
+
+
+def build_community_estimator(args, n_classes: int):
+    if HAVE_XGBOOST:
+        return 'xgboost_multiclass', XGBClassifier(
+            objective='multi:softprob',
+            num_class=int(n_classes),
+            tree_method='hist',
+            n_estimators=int(args.xgb_n_estimators),
+            max_depth=int(args.xgb_max_depth),
+            learning_rate=float(args.xgb_learning_rate),
+            subsample=float(args.xgb_subsample),
+            colsample_bytree=float(args.xgb_colsample_bytree),
+            min_child_weight=float(args.xgb_min_child_weight),
+            reg_alpha=float(args.xgb_reg_alpha),
+            reg_lambda=float(args.xgb_reg_lambda),
+            gamma=float(args.xgb_gamma),
+            max_bin=int(args.xgb_max_bin),
+            n_jobs=-1,
+            random_state=int(args.random_state),
+            eval_metric='mlogloss',
+            verbosity=0,
+            missing=np.nan,
+        )
+    return 'extratrees_multiclass', ExtraTreesClassifier(
+        n_estimators=int(args.et_n_estimators),
+        max_depth=None if int(args.et_max_depth) <= 0 else int(args.et_max_depth),
+        min_samples_leaf=int(args.et_min_samples_leaf),
+        max_features=args.et_max_features,
+        class_weight='balanced_subsample',
+        n_jobs=-1,
+        random_state=int(args.random_state),
+    )
+
+
+def fit_estimator_with_optional_weights(estimator, X, y, sample_weight: Optional[np.ndarray] = None):
+    if sample_weight is None:
+        estimator.fit(X, y)
+    else:
+        try:
+            estimator.fit(X, y, sample_weight=sample_weight)
+        except TypeError:
+            estimator.fit(X, y)
+    return estimator
+
+
+def evaluate_multiclass_model_cv(X: pd.DataFrame, y: np.ndarray, coords_x: np.ndarray, coords_y: np.ndarray, args, estimator, class_names: Sequence[str]):
+    splitter, groups, cv_scheme = build_multiclass_cv_splitter(y, coords_x, coords_y, int(args.cv_folds), float(args.cv_block_size), int(args.random_state))
+    if splitter is None:
+        raise RuntimeError('No valid community-model CV folds were produced')
+
+    y_arr = np.asarray(y, dtype=np.int32)
+    n_classes = int(len(class_names))
+    oof_pred = np.full((len(y_arr), n_classes), np.nan, dtype=np.float32)
+    fold_rows: List[Dict[str, float]] = []
+    bx = by = None
+    if groups is not None and int(args.cv_buffer_blocks) > 0:
+        bx, by, _, _ = compute_spatial_block_indices(coords_x, coords_y, float(args.cv_block_size))
+
+    split_iter = splitter.split(X, y_arr, groups=groups) if groups is not None else splitter.split(X, y_arr)
+    for fold_idx, (train_idx, test_idx) in enumerate(split_iter, start=1):
+        train_idx = np.asarray(train_idx, dtype=np.int64)
+        test_idx = np.asarray(test_idx, dtype=np.int64)
+        original_train_rows = int(len(train_idx))
+        if bx is not None and by is not None and int(args.cv_buffer_blocks) > 0:
+            train_idx = buffered_train_indices(train_idx, test_idx, bx, by, int(args.cv_buffer_blocks))
+        if len(train_idx) == 0 or len(test_idx) == 0:
+            continue
+        x_train = X.iloc[train_idx]
+        y_train = y_arr[train_idx]
+        x_test = X.iloc[test_idx]
+        y_test = y_arr[test_idx]
+        if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+            continue
+        est = clone(estimator)
+        weights_train = compute_multiclass_class_weights(y_train)
+        fit_t0 = time.perf_counter()
+        fit_estimator_with_optional_weights(est, x_train, y_train, weights_train)
+        fit_seconds = time.perf_counter() - fit_t0
+        pred_t0 = time.perf_counter()
+        proba = np.asarray(est.predict_proba(x_test), dtype=np.float32)
+        predict_seconds = time.perf_counter() - pred_t0
+        pred = np.argmax(proba, axis=1).astype(np.int32)
+        oof_pred[test_idx, :] = proba
+        fold_rows.append({
+            'fold': int(fold_idx),
+            'cv_scheme': cv_scheme,
+            'train_rows': int(len(train_idx)),
+            'train_rows_before_buffer': int(original_train_rows),
+            'test_rows': int(len(test_idx)),
+            'train_class_count': int(np.unique(y_train).size),
+            'test_class_count': int(np.unique(y_test).size),
+            'accuracy': metric_or_nan(accuracy_score, y_test, pred),
+            'balanced_accuracy': metric_or_nan(balanced_accuracy_score, y_test, pred),
+            'macro_f1': metric_or_nan(f1_score, y_test, pred, average='macro', zero_division=0),
+            'macro_precision': metric_or_nan(precision_score, y_test, pred, average='macro', zero_division=0),
+            'macro_recall': metric_or_nan(recall_score, y_test, pred, average='macro', zero_division=0),
+            'top3_accuracy': multiclass_topk_accuracy(y_test, proba, 3),
+            'logloss': metric_or_nan(log_loss, y_test, proba, labels=list(range(n_classes))),
+            'fit_seconds': float(fit_seconds),
+            'predict_seconds': float(predict_seconds),
+        })
+
+    fold_df = pd.DataFrame(fold_rows)
+    if fold_df.empty:
+        raise RuntimeError('Community-model CV produced no valid folds')
+
+    valid = np.isfinite(oof_pred).all(axis=1)
+    y_valid = y_arr[valid]
+    oof_valid = oof_pred[valid]
+    oof_pred_labels = np.argmax(oof_valid, axis=1).astype(np.int32)
+    summary = {
+        'model': getattr(estimator, '__class__', type(estimator)).__name__,
+        'cv_scheme': str(fold_df['cv_scheme'].iloc[0]),
+        'cv_accuracy_mean': float(pd.to_numeric(fold_df['accuracy'], errors='coerce').mean()),
+        'cv_balanced_accuracy_mean': float(pd.to_numeric(fold_df['balanced_accuracy'], errors='coerce').mean()),
+        'cv_macro_f1_mean': float(pd.to_numeric(fold_df['macro_f1'], errors='coerce').mean()),
+        'cv_macro_precision_mean': float(pd.to_numeric(fold_df['macro_precision'], errors='coerce').mean()),
+        'cv_macro_recall_mean': float(pd.to_numeric(fold_df['macro_recall'], errors='coerce').mean()),
+        'cv_top3_accuracy_mean': float(pd.to_numeric(fold_df['top3_accuracy'], errors='coerce').mean()),
+        'cv_logloss_mean': float(pd.to_numeric(fold_df['logloss'], errors='coerce').mean()),
+        'cv_fit_seconds_total': float(pd.to_numeric(fold_df['fit_seconds'], errors='coerce').sum()),
+        'cv_predict_seconds_total': float(pd.to_numeric(fold_df['predict_seconds'], errors='coerce').sum()),
+        'oof_accuracy': metric_or_nan(accuracy_score, y_valid, oof_pred_labels),
+        'oof_balanced_accuracy': metric_or_nan(balanced_accuracy_score, y_valid, oof_pred_labels),
+        'oof_macro_f1': metric_or_nan(f1_score, y_valid, oof_pred_labels, average='macro', zero_division=0),
+        'oof_macro_precision': metric_or_nan(precision_score, y_valid, oof_pred_labels, average='macro', zero_division=0),
+        'oof_macro_recall': metric_or_nan(recall_score, y_valid, oof_pred_labels, average='macro', zero_division=0),
+        'oof_top3_accuracy': multiclass_topk_accuracy(y_valid, oof_valid, 3),
+        'oof_logloss': metric_or_nan(log_loss, y_valid, oof_valid, labels=list(range(n_classes))),
+    }
+
+    class_rows: List[Dict[str, float]] = []
+    class_thresholds = np.full(n_classes, np.nan, dtype=np.float32)
+    for class_idx, class_name in enumerate(class_names):
+        y_bin = (y_valid == class_idx).astype(np.int8)
+        scores = oof_valid[:, class_idx]
+        threshold = float(pick_threshold(y_bin, scores)) if np.any(y_bin == 1) else float('nan')
+        if not np.isfinite(threshold):
+            threshold = max(0.02, min(0.5, 1.0 / max(2, n_classes)))
+        class_thresholds[class_idx] = np.float32(threshold)
+        pred_bin = (scores >= threshold).astype(np.int8)
+        pred_label_bin = (oof_pred_labels == class_idx).astype(np.int8)
+        class_rows.append({
+            'group': str(class_name),
+            'class_index': int(class_idx),
+            'occurrence_rows_used': int(np.sum(y_arr == class_idx)),
+            'oof_rows_scored': int(np.sum(y_valid == class_idx)),
+            'mean_true_class_probability': float(np.nanmean(scores[y_bin == 1])) if np.any(y_bin == 1) else float('nan'),
+            'oof_threshold': float(threshold),
+            'oof_precision_thresholded': metric_or_nan(precision_score, y_bin, pred_bin, zero_division=0),
+            'oof_recall_thresholded': metric_or_nan(recall_score, y_bin, pred_bin, zero_division=0),
+            'oof_f1_thresholded': metric_or_nan(f1_score, y_bin, pred_bin, zero_division=0),
+            'oof_precision_argmax': metric_or_nan(precision_score, y_bin, pred_label_bin, zero_division=0),
+            'oof_recall_argmax': metric_or_nan(recall_score, y_bin, pred_label_bin, zero_division=0),
+            'oof_f1_argmax': metric_or_nan(f1_score, y_bin, pred_label_bin, zero_division=0),
+        })
+    class_metrics_df = pd.DataFrame(class_rows).sort_values(['occurrence_rows_used', 'group'], ascending=[False, True]).reset_index(drop=True)
+    return summary, fold_df, class_metrics_df, class_thresholds
+
+
+def train_and_write_community_model(outdir: Path, args, spec: FeatureSpec, group_meta: pd.DataFrame, occ_work: pd.DataFrame, grid_work: pd.DataFrame) -> Dict[str, object]:
+    community_dir = outdir / 'community_model'
+    community_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_groups = [str(g) for g in group_meta['group'].astype(str).tolist()]
+    log(f'[community] preparing shared model candidate_groups={len(selected_groups)}')
+    if not selected_groups:
+        return {'enabled': True, 'status': 'no_groups'}
+
+    community_occ = occ_work[occ_work['__group__'].astype(str).isin(set(selected_groups))].copy()
+    community_occ = community_occ.dropna(subset=[args.occ_x_col, args.occ_y_col]).reset_index(drop=True)
+    if bool(args.dedupe_positive_by_coords):
+        community_occ['__coord_key__'] = community_occ[args.occ_x_col].round(6).astype(str) + '|' + community_occ[args.occ_y_col].round(6).astype(str)
+        community_occ = community_occ.drop_duplicates(subset=['__group__', '__coord_key__']).drop(columns=['__coord_key__'])
+
+    min_occ = max(2, int(getattr(args, 'community_min_occurrences_per_group', 20)))
+    group_counts = community_occ['__group__'].astype(str).value_counts(dropna=False)
+    keep_groups = [g for g in selected_groups if int(group_counts.get(g, 0)) >= min_occ]
+    community_occ = community_occ[community_occ['__group__'].astype(str).isin(set(keep_groups))].copy().reset_index(drop=True)
+    if community_occ.empty or len(keep_groups) < 2:
+        log('[community] skipped not enough groups with occurrence rows after cleanup')
+        return {'enabled': True, 'status': 'skipped_insufficient_groups'}
+
+    max_per_group = int(getattr(args, 'community_max_occurrences_per_group', 50000))
+    rng = np.random.default_rng(int(args.random_state) + 1001)
+    if max_per_group > 0:
+        sampled_parts = []
+        for group in keep_groups:
+            gdf = community_occ[community_occ['__group__'].astype(str) == group]
+            if len(gdf) > max_per_group:
+                choose = np.sort(rng.choice(np.arange(len(gdf), dtype=np.int64), size=max_per_group, replace=False))
+                gdf = gdf.iloc[choose]
+            sampled_parts.append(gdf)
+        community_occ = pd.concat(sampled_parts, ignore_index=True)
+
+    class_names = sorted(community_occ['__group__'].astype(str).unique().tolist())
+    log(f'[community] training groups={len(class_names)} occurrence_rows={len(community_occ):,}')
+    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    y_multi = community_occ['__group__'].astype(str).map(class_to_idx).to_numpy(dtype=np.int32)
+    coords_x = pd.to_numeric(community_occ[args.occ_x_col], errors='coerce').to_numpy(dtype=float)
+    coords_y = pd.to_numeric(community_occ[args.occ_y_col], errors='coerce').to_numpy(dtype=float)
+
+    X_all = transform_features(community_occ, spec)
+    subset_idx = stratified_cap_rows(y_multi, int(getattr(args, 'community_feature_select_max_rows', args.feature_select_max_rows)), int(args.random_state) + 7)
+    X_select = X_all.iloc[subset_idx].copy()
+    keep = variance_filter(X_select, threshold=float(args.variance_threshold))
+    if not keep:
+        log('[community] skipped no features survived variance filter')
+        return {'enabled': True, 'status': 'skipped_no_features_after_variance'}
+    X_all = X_all[keep].copy()
+    X_select = X_select[keep].copy()
+    corr_keep = correlation_prune(X_select, X_select.columns, threshold=float(args.corr_threshold))
+    corr_keep = sorted(corr_keep, key=lambda c: (-float(spec.feature_priority.get(c.split('__', 1)[0], 0.0)), c))
+    max_after_corr = int(getattr(args, 'community_max_features_after_corr', args.max_features_after_corr))
+    if max_after_corr > 0:
+        corr_keep = corr_keep[:max_after_corr]
+    if not corr_keep:
+        log('[community] skipped no features survived correlation prune')
+        return {'enabled': True, 'status': 'skipped_no_features_after_correlation'}
+    X_final = X_all[corr_keep].copy()
+
+    estimator_name, estimator = build_community_estimator(args, len(class_names))
+    use_imputer = estimator_name.startswith('extratrees')
+    imputer = None
+    if use_imputer:
+        imp_idx = stratified_cap_rows(y_multi, min(len(y_multi), int(getattr(args, 'community_imputer_fit_max_rows', 200000))), int(args.random_state) + 17)
+        imputer = SimpleImputer(strategy='median')
+        imputer.fit(X_final.iloc[imp_idx])
+        X_final = pd.DataFrame(imputer.transform(X_final), columns=corr_keep, index=X_final.index)
+
+    cv_summary, cv_folds_df, class_metrics_df, class_thresholds = evaluate_multiclass_model_cv(X_final, y_multi, coords_x, coords_y, args, estimator, class_names)
+    final_model = clone(estimator)
+    weights_full = compute_multiclass_class_weights(y_multi)
+    fit_estimator_with_optional_weights(final_model, X_final, y_multi, weights_full)
+
+    model_payload = {
+        'model_name': estimator_name,
+        'model': final_model,
+        'class_names': class_names,
+        'class_thresholds': class_thresholds.tolist(),
+        'raw_feature_columns': list(corr_keep),
+        'final_feature_columns': list(corr_keep),
+        'categorical_vocab': spec.categorical_vocab,
+        'numeric_cols': spec.numeric_cols,
+        'categorical_cols': spec.categorical_cols,
+    }
+    if imputer is not None:
+        model_payload['imputer'] = imputer
+    joblib.dump(model_payload, community_dir / 'community_model.joblib')
+
+    cv_folds_df.to_csv(community_dir / 'community_cv_folds.csv', index=False)
+
+    grid_X = transform_features(grid_work, spec)[corr_keep].copy()
+    if imputer is not None:
+        grid_X = pd.DataFrame(imputer.transform(grid_X), columns=corr_keep, index=grid_X.index)
+
+    n_rows = len(grid_work)
+    n_classes = len(class_names)
+    top_idx_arr = np.full(n_rows, -1, dtype=np.int32)
+    top_score_arr = np.full(n_rows, np.nan, dtype=np.float32)
+    second_score_arr = np.full(n_rows, np.nan, dtype=np.float32)
+    top_gap_arr = np.full(n_rows, np.nan, dtype=np.float32)
+    effective_richness_arr = np.full(n_rows, np.nan, dtype=np.float32)
+    richness_above_arr = np.full(n_rows, 0, dtype=np.int32)
+    sum_prob = np.zeros(n_classes, dtype=np.float64)
+    max_prob = np.zeros(n_classes, dtype=np.float32)
+    top_wins = np.zeros(n_classes, dtype=np.int64)
+    above_threshold_cells = np.zeros(n_classes, dtype=np.int64)
+
+    chunk_size = max(1, int(getattr(args, 'predict_chunk_size', 50000)))
+    threshold_override = pd.to_numeric(getattr(args, 'community_share_threshold', -1.0), errors='coerce')
+    if pd.notna(threshold_override) and float(threshold_override) > 0:
+        thresholds_vec = np.full(n_classes, float(threshold_override), dtype=np.float32)
+        threshold_mode = 'fixed'
+    else:
+        thresholds_vec = np.asarray(class_thresholds, dtype=np.float32)
+        fill_val = max(0.02, min(0.5, 1.0 / max(2, n_classes)))
+        thresholds_vec[~np.isfinite(thresholds_vec)] = fill_val
+        threshold_mode = 'oof_per_class'
+
+    for start in range(0, n_rows, chunk_size):
+        end = min(n_rows, start + chunk_size)
+        proba = np.asarray(final_model.predict_proba(grid_X.iloc[start:end]), dtype=np.float32)
+        top_idx = np.argmax(proba, axis=1).astype(np.int32)
+        top_score = proba[np.arange(len(proba)), top_idx]
+        second_score = np.partition(proba, proba.shape[1] - 2, axis=1)[:, -2] if proba.shape[1] >= 2 else np.zeros(len(proba), dtype=np.float32)
+        eff_rich = 1.0 / np.maximum(np.sum(np.square(proba, dtype=np.float32), axis=1), 1e-6)
+        above = np.sum(proba >= thresholds_vec[None, :], axis=1).astype(np.int32)
+
+        top_idx_arr[start:end] = top_idx
+        top_score_arr[start:end] = top_score.astype(np.float32)
+        second_score_arr[start:end] = second_score.astype(np.float32)
+        top_gap_arr[start:end] = (top_score - second_score).astype(np.float32)
+        effective_richness_arr[start:end] = eff_rich.astype(np.float32)
+        richness_above_arr[start:end] = above
+
+        sum_prob += np.sum(proba, axis=0, dtype=np.float64)
+        max_prob = np.maximum(max_prob, np.max(proba, axis=0))
+        top_wins += np.bincount(top_idx, minlength=n_classes).astype(np.int64)
+        above_threshold_cells += np.sum(proba >= thresholds_vec[None, :], axis=0).astype(np.int64)
+
+    top_group = np.array([class_names[i] if i >= 0 else '' for i in top_idx_arr], dtype=object)
+    community_overall = pd.DataFrame({
+        args.id_col: grid_work[args.id_col].tolist(),
+        args.x_col: grid_work[args.x_col].tolist(),
+        args.y_col: grid_work[args.y_col].tolist(),
+        'community_top_group': top_group,
+        'community_top_score': top_score_arr,
+        'community_second_score': second_score_arr,
+        'community_top_gap': top_gap_arr,
+        'community_effective_richness': effective_richness_arr,
+        'community_richness_above_threshold': richness_above_arr,
+    })
+    community_overall.to_csv(community_dir / 'community_overall.csv', index=False)
+
+    grid_rows = []
+    class_metric_lookup = class_metrics_df.set_index('group', drop=False) if not class_metrics_df.empty else pd.DataFrame()
+    for class_idx, class_name in enumerate(class_names):
+        row = {
+            'group': class_name,
+            'class_index': int(class_idx),
+            'occurrence_rows_used': int(np.sum(y_multi == class_idx)),
+            'mean_grid_share': float(sum_prob[class_idx] / max(1, n_rows)),
+            'max_grid_share': float(max_prob[class_idx]),
+            'grid_top_wins': int(top_wins[class_idx]),
+            'grid_cells_above_threshold': int(above_threshold_cells[class_idx]),
+            'community_threshold': float(thresholds_vec[class_idx]),
+            'community_threshold_mode': threshold_mode,
+        }
+        if not class_metric_lookup.empty and class_name in class_metric_lookup.index:
+            metric_row = class_metric_lookup.loc[class_name]
+            if isinstance(metric_row, pd.DataFrame):
+                metric_row = metric_row.iloc[0]
+            for key in ['mean_true_class_probability', 'oof_threshold', 'oof_precision_thresholded', 'oof_recall_thresholded', 'oof_f1_thresholded', 'oof_precision_argmax', 'oof_recall_argmax', 'oof_f1_argmax']:
+                val = pd.to_numeric(metric_row.get(key, np.nan), errors='coerce')
+                row[key] = float(val) if pd.notna(val) else float('nan')
+        grid_rows.append(row)
+    community_species_summary = pd.DataFrame(grid_rows).sort_values(['mean_grid_share', 'max_grid_share', 'group'], ascending=[False, False, True]).reset_index(drop=True)
+    community_species_summary.to_csv(community_dir / 'community_species_summary.csv', index=False)
+    pd.DataFrame([cv_summary]).to_csv(community_dir / 'community_model_summary.csv', index=False)
+
+    if int(args.preview_top_n) > 0:
+        preview_dir = outdir / 'previews' / 'community'
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_point_map(community_overall, 'community_top_score', 'community top-species share', preview_dir / 'community_top_score.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+        preview_point_map(community_overall, 'community_top_gap', 'community top-vs-second gap', preview_dir / 'community_top_gap.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+        preview_point_map(community_overall, 'community_effective_richness', 'community effective richness', preview_dir / 'community_effective_richness.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+        preview_point_map(community_overall, 'community_richness_above_threshold', 'community richness above class thresholds', preview_dir / 'community_richness_above_threshold.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+
+    log(f'[community] done groups={len(class_names)} grid_rows={n_rows:,} outdir={community_dir}')
+    return {
+        'enabled': True,
+        'status': 'ok',
+        'model_name': estimator_name,
+        'group_count': int(len(class_names)),
+        'occurrence_rows_used': int(len(community_occ)),
+        'feature_count': int(len(corr_keep)),
+        'threshold_mode': threshold_mode,
+        'cv_accuracy_mean': float(cv_summary.get('cv_accuracy_mean', float('nan'))),
+        'cv_macro_f1_mean': float(cv_summary.get('cv_macro_f1_mean', float('nan'))),
+        'oof_accuracy': float(cv_summary.get('oof_accuracy', float('nan'))),
+        'oof_macro_f1': float(cv_summary.get('oof_macro_f1', float('nan'))),
+        'oof_top3_accuracy': float(cv_summary.get('oof_top3_accuracy', float('nan'))),
+        'oof_logloss': float(cv_summary.get('oof_logloss', float('nan'))),
+    }
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description='Train classical ML suitability models after aggregate_occurrence_trends.py, compare ExtraTrees vs XGBoost, and keep the better model per species.')
-    ap.add_argument('occurrences_csv', help='Enriched occurrence CSV, usually occurrences_enriched.cleaned.csv')
-    ap.add_argument('grid_csv', help='Grid CSV with matching environmental predictors, usually grid_with_env.csv')
+    ap.add_argument('occurrences_csv', nargs='?', default=None, help='Enriched occurrence CSV, usually occurrences_enriched.cleaned.csv')
+    ap.add_argument('grid_csv', nargs='?', default=None, help='Grid CSV with matching environmental predictors, usually grid_with_env.csv')
     ap.add_argument('--trend-summary', default=None, help='Directory with aggregate_occurrence_trends.py outputs. Defaults to <occurrences_csv_dir>/trend_summary')
     ap.add_argument('--outdir', required=True, help='Output directory')
+    ap.add_argument('--make-previews', action='store_true', help='Generate preview PNGs from existing outputs under --outdir without retraining the ML models')
     ap.add_argument('--group-by', default='matched_species_name', help='Grouping column, usually matched_species_name')
     ap.add_argument('--include-taxa', nargs='*', default=None, help='Optional rank selectors such as family:Rosaceae genus:Ribes species:Daucus pusillus')
     ap.add_argument('--exclude-taxa', nargs='*', default=None, help='Optional rank selectors to exclude')
@@ -1088,15 +1764,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument('--corr-threshold', type=float, default=0.98)
     ap.add_argument('--max-features-after-corr', type=int, default=96)
     ap.add_argument('--background-multiplier', type=float, default=3.0)
-    ap.add_argument('--background-source', choices=['target_group', 'grid', 'mixed'], default='target_group', help='Use other occurrence records as target-group background, grid background, or a mixture of both')
-    ap.add_argument('--target-group-share', type=float, default=0.8, help='When background-source=mixed, share of background rows drawn from target-group occurrences')
-    ap.add_argument('--background-sampling', choices=['mixed', 'regional', 'global'], default='mixed')
-    ap.add_argument('--background-local-share', type=float, default=0.85)
-    ap.add_argument('--background-min-local-fraction', type=float, default=0.35)
-    ap.add_argument('--background-bbox-pad-fraction', type=float, default=0.25)
+    ap.add_argument('--background-source', choices=['target_group', 'grid', 'mixed'], default='mixed', help='Use other occurrence records as target-group background, grid background, or a mixture of both')
+    ap.add_argument('--target-group-share', type=float, default=0.4, help='When background-source=mixed, share of background rows drawn from target-group occurrences')
+    ap.add_argument('--background-sampling', choices=['mixed', 'regional', 'global'], default='regional')
+    ap.add_argument('--background-local-share', type=float, default=0.7)
+    ap.add_argument('--background-min-local-fraction', type=float, default=0.5)
+    ap.add_argument('--background-bbox-pad-fraction', type=float, default=0.12)
     ap.add_argument('--background-bbox-pad-min', type=float, default=0.15)
     ap.add_argument('--background-block-size', type=float, default=0.25)
-    ap.add_argument('--background-block-buffer', type=int, default=1)
+    ap.add_argument('--background-block-buffer', type=int, default=2)
     ap.add_argument('--min-background', type=int, default=2000)
     ap.add_argument('--max-background', type=int, default=30000)
     ap.add_argument('--dedupe-positive-by-coords', dest='dedupe_positive_by_coords', action='store_true')
@@ -1111,35 +1787,67 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument('--joint-min-share', type=float, default=0.7)
     ap.add_argument('--joint-tail-fraction', type=float, default=0.25)
     ap.add_argument('--joint-rank-power', type=float, default=1.5)
-    ap.add_argument('--preview-top-n', type=int, default=8)
+    ap.add_argument('--preview-top-n', type=int, default=500000)
     ap.add_argument('--preview-coarsen', type=int, default=2)
     ap.add_argument('--preview-point-alpha', type=float, default=0.35)
     ap.add_argument('--preview-vmax', type=float, default=DEFAULT_PREVIEW_VMAX)
+    ap.add_argument('--preview-minimum-score-threshold', type=float, default=0.0, help='Set preview-only suitability values below this threshold to 0 before plotting; does not modify saved CSVs')
     ap.add_argument('--et-n-estimators', dest='et_n_estimators', type=int, default=500)
     ap.add_argument('--et-max-depth', dest='et_max_depth', type=int, default=0)
     ap.add_argument('--et-min-samples-leaf', dest='et_min_samples_leaf', type=int, default=1)
     ap.add_argument('--et-max-features', dest='et_max_features', default='sqrt')
     ap.add_argument('--xgb-n-estimators', dest='xgb_n_estimators', type=int, default=350)
-    ap.add_argument('--xgb-max-depth', dest='xgb_max_depth', type=int, default=5)
+    ap.add_argument('--xgb-max-depth', dest='xgb_max_depth', type=int, default=3)
     ap.add_argument('--xgb-learning-rate', dest='xgb_learning_rate', type=float, default=0.05)
-    ap.add_argument('--xgb-subsample', dest='xgb_subsample', type=float, default=0.8)
-    ap.add_argument('--xgb-colsample-bytree', dest='xgb_colsample_bytree', type=float, default=0.8)
-    ap.add_argument('--xgb-min-child-weight', dest='xgb_min_child_weight', type=float, default=1.0)
-    ap.add_argument('--xgb-reg-alpha', dest='xgb_reg_alpha', type=float, default=0.0)
-    ap.add_argument('--xgb-reg-lambda', dest='xgb_reg_lambda', type=float, default=1.0)
-    ap.add_argument('--xgb-gamma', dest='xgb_gamma', type=float, default=0.0)
+    ap.add_argument('--xgb-subsample', dest='xgb_subsample', type=float, default=0.7)
+    ap.add_argument('--xgb-colsample-bytree', dest='xgb_colsample_bytree', type=float, default=0.7)
+    ap.add_argument('--xgb-min-child-weight', dest='xgb_min_child_weight', type=float, default=6.0)
+    ap.add_argument('--xgb-reg-alpha', dest='xgb_reg_alpha', type=float, default=0.5)
+    ap.add_argument('--xgb-reg-lambda', dest='xgb_reg_lambda', type=float, default=5.0)
+    ap.add_argument('--xgb-gamma', dest='xgb_gamma', type=float, default=1.0)
     ap.add_argument('--xgb-max-bin', dest='xgb_max_bin', type=int, default=256)
+    ap.add_argument('--deployment-score-mode', choices=['conservative', 'raw'], default='conservative', help='Use the conservative center-weighted score for ml_probability, or expose the raw tree score directly')
+    ap.add_argument('--deployment-center-top-features', type=int, default=24, help='Maximum number of top numeric predictors used to build the conservative center-of-niche adjustment')
+    ap.add_argument('--deployment-center-low-quantile', type=float, default=0.10, help='Lower positive-training quantile used as the broad central support envelope for conservative ML suitability')
+    ap.add_argument('--deployment-center-high-quantile', type=float, default=0.90, help='Upper positive-training quantile used as the broad central support envelope for conservative ML suitability')
+    ap.add_argument('--deployment-center-iqr-multiplier', type=float, default=1.5, help='Widen the smooth center-weight decay relative to the positive IQR')
+    ap.add_argument('--deployment-support-pad-fraction', type=float, default=0.15, help='Expand the observed positive support range before novelty penalties begin')
+    ap.add_argument('--deployment-raw-power', type=float, default=1.1, help='Shrink raw tree probabilities slightly before the conservative center and novelty adjustments')
+    ap.add_argument('--deployment-center-floor', type=float, default=0.4, help='Minimum centrality factor retained at the margins before novelty penalties are applied')
+    ap.add_argument('--deployment-center-power', type=float, default=1.25, help='Additional emphasis placed on the niche center after averaging centrality scores across features')
+    ap.add_argument('--deployment-center-distance-power', type=float, default=1.6, help='How fast the centrality score falls as a grid cell moves away from the positive median')
+    ap.add_argument('--deployment-novelty-strength', type=float, default=1.75, help='Strength of the extrapolation penalty once a cell moves beyond the broadened observed support range')
+    ap.add_argument('--deployment-novelty-floor', type=float, default=0.08, help='Minimum retained extrapolation factor for the conservative ML suitability score')
+    ap.add_argument('--train-community-model', action='store_true', help='Train an additional shared community-composition multiclass model alongside the per-species models')
+    ap.add_argument('--community-only', action='store_true', help='Skip per-species model training and train only the shared community-composition model')
+    ap.add_argument('--community-min-occurrences-per-group', type=int, default=20, help='Minimum cleaned occurrence rows required for a group to participate in the shared community model')
+    ap.add_argument('--community-max-occurrences-per-group', type=int, default=50000, help='Cap occurrence rows per group for the shared community model to control memory and imbalance; <= 0 keeps all')
+    ap.add_argument('--community-feature-select-max-rows', type=int, default=60000, help='Maximum stratified rows used while pruning features for the shared community model')
+    ap.add_argument('--community-max-features-after-corr', type=int, default=96, help='Maximum retained encoded predictors after correlation pruning for the shared community model')
+    ap.add_argument('--community-imputer-fit-max-rows', type=int, default=200000, help='Maximum rows used when fitting the fallback community-model imputer if XGBoost is unavailable')
+    ap.add_argument('--community-share-threshold', type=float, default=-1.0, help='Override threshold used for the community richness preview. Use <= 0 to derive one threshold per species from out-of-fold community predictions')
     ap.set_defaults(dedupe_positive_by_coords=True)
     return ap.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if bool(getattr(args, 'community_only', False)):
+        args.train_community_model = True
+    outdir = Path(args.outdir).resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if bool(args.make_previews):
+        generate_previews_from_existing_outputs(outdir, args)
+        log(f'[previews] regenerated previews under {outdir / "previews"}')
+        return 0
+
+    if not args.occurrences_csv or not args.grid_csv:
+        raise ValueError('occurrences_csv and grid_csv are required unless --make-previews is set')
+
     occ_csv = Path(args.occurrences_csv).resolve()
     grid_csv = Path(args.grid_csv).resolve()
     trend_summary_dir = infer_trend_summary_dir(occ_csv, Path(args.trend_summary).resolve() if args.trend_summary else None)
-    outdir = Path(args.outdir).resolve()
-    outdir.mkdir(parents=True, exist_ok=True)
 
     if not occ_csv.exists():
         raise FileNotFoundError(f'Missing occurrences_csv: {occ_csv}')
@@ -1224,13 +1932,17 @@ def main() -> int:
 
     group_meta.to_csv(outdir / 'selected_groups.csv', index=False)
 
+    run_species_models = not bool(getattr(args, 'community_only', False))
     artifacts = []
     species_rows = []
     pred_stack = []
+    pred_raw_stack = []
     thresholds = []
+    group_names = []
 
     model_comp_dir = outdir / 'model_comparison'
-    model_comp_dir.mkdir(parents=True, exist_ok=True)
+    if run_species_models:
+        model_comp_dir.mkdir(parents=True, exist_ok=True)
 
     pd.DataFrame({
         'feature': spec.encoded_columns,
@@ -1239,276 +1951,316 @@ def main() -> int:
     }).to_csv(outdir / 'selected_features.csv', index=False)
 
     rng = np.random.default_rng(int(args.random_state))
-    for row in group_meta.itertuples(index=False):
-        group = str(getattr(row, 'group'))
-        pos_df = occ_work[occ_work['__group__'].astype(str) == group].copy()
-        pos_df = pos_df.dropna(subset=[args.occ_x_col, args.occ_y_col]).reset_index(drop=True)
-        if bool(args.dedupe_positive_by_coords):
-            pos_df['__coord_key__'] = pos_df[args.occ_x_col].round(6).astype(str) + '|' + pos_df[args.occ_y_col].round(6).astype(str)
-            pos_df = pos_df.drop_duplicates(subset=['__coord_key__']).drop(columns=['__coord_key__'])
-        if len(pos_df) < max(2, int(args.min_occurrences_per_group)):
-            log(f'[skip] group={group} positives_after_cleanup={len(pos_df)}')
-            continue
+    if run_species_models:
+        for row in group_meta.itertuples(index=False):
+            group = str(getattr(row, 'group'))
+            pos_df = occ_work[occ_work['__group__'].astype(str) == group].copy()
+            pos_df = pos_df.dropna(subset=[args.occ_x_col, args.occ_y_col]).reset_index(drop=True)
+            if bool(args.dedupe_positive_by_coords):
+                pos_df['__coord_key__'] = pos_df[args.occ_x_col].round(6).astype(str) + '|' + pos_df[args.occ_y_col].round(6).astype(str)
+                pos_df = pos_df.drop_duplicates(subset=['__coord_key__']).drop(columns=['__coord_key__'])
+            if len(pos_df) < max(2, int(args.min_occurrences_per_group)):
+                log(f'[skip] group={group} positives_after_cleanup={len(pos_df)}')
+                continue
 
-        bg_target = int(round(max(float(args.min_background), float(args.background_multiplier) * float(len(pos_df)))))
-        bg_target = max(int(args.min_background), min(int(args.max_background), bg_target))
-        pos_x_vals = pd.to_numeric(pos_df[args.occ_x_col], errors='coerce').to_numpy(dtype=float)
-        pos_y_vals = pd.to_numeric(pos_df[args.occ_y_col], errors='coerce').to_numpy(dtype=float)
+            bg_target = int(round(max(float(args.min_background), float(args.background_multiplier) * float(len(pos_df)))))
+            bg_target = max(int(args.min_background), min(int(args.max_background), bg_target))
+            pos_x_vals = pd.to_numeric(pos_df[args.occ_x_col], errors='coerce').to_numpy(dtype=float)
+            pos_y_vals = pd.to_numeric(pos_df[args.occ_y_col], errors='coerce').to_numpy(dtype=float)
 
-        bg_source = str(args.background_source)
-        bg_parts = []
-        bg_stats_parts = []
-        if bg_source in {'target_group', 'mixed'}:
-            target_pool_mask = occ_bg_groups_arr != group
-            target_idx_all = np.flatnonzero(target_pool_mask)
-            if len(target_idx_all) > 0:
-                target_target = int(bg_target) if bg_source == 'target_group' else int(round(bg_target * float(args.target_group_share)))
-                target_target = min(target_target, len(target_idx_all))
-                target_rel_idx, target_stats = sample_background_from_source(
-                    occ_bg_x_all[target_idx_all],
-                    occ_bg_y_all[target_idx_all],
-                    occ_bg_block_keys[target_idx_all],
+            bg_source = str(args.background_source)
+            bg_parts = []
+            bg_stats_parts = []
+            if bg_source in {'target_group', 'mixed'}:
+                target_pool_mask = occ_bg_groups_arr != group
+                target_idx_all = np.flatnonzero(target_pool_mask)
+                if len(target_idx_all) > 0:
+                    target_target = int(bg_target) if bg_source == 'target_group' else int(round(bg_target * float(args.target_group_share)))
+                    target_target = min(target_target, len(target_idx_all))
+                    target_rel_idx, target_stats = sample_background_from_source(
+                        occ_bg_x_all[target_idx_all],
+                        occ_bg_y_all[target_idx_all],
+                        occ_bg_block_keys[target_idx_all],
+                        bg_origin_x,
+                        bg_origin_y,
+                        pos_x_vals,
+                        pos_y_vals,
+                        target_target,
+                        args,
+                        rng,
+                    )
+                    if len(target_rel_idx) > 0:
+                        target_bg = occ_bg_work.iloc[target_idx_all[target_rel_idx]].copy().reset_index(drop=True)
+                        target_bg[args.x_col] = pd.to_numeric(target_bg[args.occ_x_col], errors='coerce')
+                        target_bg[args.y_col] = pd.to_numeric(target_bg[args.occ_y_col], errors='coerce')
+                        bg_parts.append(target_bg)
+                    target_stats['source'] = 'target_group'
+                    target_stats['rows_selected'] = int(len(target_rel_idx))
+                    bg_stats_parts.append(target_stats)
+            if bg_source in {'grid', 'mixed'}:
+                grid_target = int(bg_target) if bg_source == 'grid' else max(0, int(bg_target) - sum(len(df) for df in bg_parts))
+                grid_target = min(grid_target, len(grid_work))
+                grid_idx, grid_stats = sample_background_indices(
+                    grid_x_all,
+                    grid_y_all,
+                    grid_bg_groups,
                     bg_origin_x,
                     bg_origin_y,
                     pos_x_vals,
                     pos_y_vals,
-                    target_target,
+                    grid_target,
                     args,
                     rng,
                 )
-                if len(target_rel_idx) > 0:
-                    target_bg = occ_bg_work.iloc[target_idx_all[target_rel_idx]].copy().reset_index(drop=True)
-                    target_bg[args.x_col] = pd.to_numeric(target_bg[args.occ_x_col], errors='coerce')
-                    target_bg[args.y_col] = pd.to_numeric(target_bg[args.occ_y_col], errors='coerce')
-                    bg_parts.append(target_bg)
-                target_stats['source'] = 'target_group'
-                target_stats['rows_selected'] = int(len(target_rel_idx))
-                bg_stats_parts.append(target_stats)
-        if bg_source in {'grid', 'mixed'}:
-            grid_target = int(bg_target) if bg_source == 'grid' else max(0, int(bg_target) - sum(len(df) for df in bg_parts))
-            grid_target = min(grid_target, len(grid_work))
-            grid_idx, grid_stats = sample_background_indices(
-                grid_x_all,
-                grid_y_all,
-                grid_bg_groups,
-                bg_origin_x,
-                bg_origin_y,
-                pos_x_vals,
-                pos_y_vals,
-                grid_target,
-                args,
-                rng,
+                if len(grid_idx) > 0:
+                    bg_parts.append(grid_work.iloc[grid_idx].copy().reset_index(drop=True))
+                grid_stats['source'] = 'grid'
+                grid_stats['rows_selected'] = int(len(grid_idx))
+                bg_stats_parts.append(grid_stats)
+            if not bg_parts:
+                log(f'[skip] group={group} insufficient background candidates after spatial filtering background_rows=0')
+                continue
+            bg_df = pd.concat(bg_parts, ignore_index=True)
+            if len(bg_df) > int(bg_target):
+                choose_idx = np.sort(rng.choice(np.arange(len(bg_df), dtype=np.int64), size=int(bg_target), replace=False))
+                bg_df = bg_df.iloc[choose_idx].reset_index(drop=True)
+            if len(bg_df) < max(2, int(args.min_background * 0.5)):
+                log(f'[skip] group={group} insufficient background candidates after spatial filtering background_rows={len(bg_df)}')
+                continue
+
+            pos_x = transform_features(pos_df, spec)
+            bg_x = transform_features(bg_df, spec)
+            y = np.concatenate([np.ones(len(pos_x), dtype=np.int8), np.zeros(len(bg_x), dtype=np.int8)])
+            X = pd.concat([pos_x, bg_x], axis=0, ignore_index=True)
+            coords_x = np.concatenate([pd.to_numeric(pos_df[args.occ_x_col], errors='coerce').to_numpy(dtype=float), pd.to_numeric(bg_df[args.x_col], errors='coerce').to_numpy(dtype=float)])
+            coords_y = np.concatenate([pd.to_numeric(pos_df[args.occ_y_col], errors='coerce').to_numpy(dtype=float), pd.to_numeric(bg_df[args.y_col], errors='coerce').to_numpy(dtype=float)])
+
+            subset_idx = stratified_cap_rows(y, int(args.feature_select_max_rows), int(args.random_state))
+            X_select = X.iloc[subset_idx].copy()
+            keep = variance_filter(X_select, threshold=float(args.variance_threshold))
+            if not keep:
+                log(f'[skip] group={group} no features survived variance filter')
+                continue
+            X = X[keep].copy()
+            X_select = X_select[keep].copy()
+
+            imputer = SimpleImputer(strategy='median')
+            X_imp = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+            X_select_imp = X_imp.iloc[subset_idx].reset_index(drop=True)
+            corr_keep = correlation_prune(X_select_imp, X_select_imp.columns, threshold=float(args.corr_threshold))
+            corr_keep = sorted(corr_keep, key=lambda c: (-float(spec.feature_priority.get(c.split('__', 1)[0], 0.0)), c))
+            if int(args.max_features_after_corr) > 0:
+                corr_keep = corr_keep[:int(args.max_features_after_corr)]
+            if not corr_keep:
+                log(f'[skip] group={group} no features survived correlation prune')
+                continue
+            X_final = X_imp[corr_keep].copy()
+
+            scale_pos_weight = float(max(1.0, len(bg_x) / max(1, len(pos_x))))
+            estimator_map = build_estimators(args, scale_pos_weight)
+            if not estimator_map:
+                raise RuntimeError('No estimators available')
+            best_name, cv_summary, cv_folds_df = evaluate_candidate_models(X_final, y, coords_x, coords_y, args, estimator_map)
+            final_model = fit_final_model(X_final, y, estimator_map, best_name)
+            threshold = float(args.probability_threshold) if float(args.probability_threshold) >= 0 else float(cv_summary.loc[cv_summary['model'] == best_name, 'cv_threshold_median'].iloc[0])
+
+            perm_idx = stratified_cap_rows(y, min(len(y), 12000), int(args.random_state))
+            perm_X = X_final.iloc[perm_idx].reset_index(drop=True)
+            perm_y = y[perm_idx]
+            perm = permutation_importance(final_model, perm_X, perm_y, n_repeats=5, random_state=int(args.random_state), scoring='average_precision', n_jobs=-1)
+            perm_df = pd.DataFrame({'feature': corr_keep, 'perm_importance_mean': perm.importances_mean, 'perm_importance_std': perm.importances_std})
+            perm_df = perm_df.sort_values(['perm_importance_mean', 'feature'], ascending=[False, True]).reset_index(drop=True)
+
+            model_dir = outdir / 'models'
+            model_dir.mkdir(parents=True, exist_ok=True)
+            imp_dir = outdir / 'feature_importance'
+            imp_dir.mkdir(parents=True, exist_ok=True)
+            slug = safe_slug(group)
+            model_path = model_dir / f'{slug}.joblib'
+            feature_path = imp_dir / f'{slug}.csv'
+            perm_df.to_csv(feature_path, index=False)
+
+            grid_X_all = transform_features(grid_work, spec)
+            grid_X_imp = pd.DataFrame(imputer.transform(grid_X_all[X.columns]), columns=X.columns)
+            grid_X_final = grid_X_imp[corr_keep]
+            raw_proba = predict_in_chunks(final_model, grid_X_final, int(args.predict_chunk_size))
+
+            importance_lookup = build_feature_importance_lookup(final_model, perm_df, spec.feature_priority)
+            pos_X_final = X_final.iloc[:len(pos_x)].reset_index(drop=True)
+            conservative_spec = build_conservative_suitability_spec(pos_X_final, corr_keep, spec.numeric_cols, importance_lookup, args)
+            conservative_suitability, center_weight, novelty_penalty, adjustment_factor = apply_conservative_suitability_spec(grid_X_final, raw_proba, conservative_spec)
+            train_raw_proba = predict_in_chunks(final_model, X_final, int(args.predict_chunk_size))
+            train_conservative_suitability, _, _, _ = apply_conservative_suitability_spec(X_final, train_raw_proba, conservative_spec)
+            if str(args.deployment_score_mode) == 'conservative':
+                deployment_threshold = float(args.probability_threshold) if float(args.probability_threshold) >= 0 else float(pick_threshold(y, train_conservative_suitability))
+                deployed_score = conservative_suitability
+            else:
+                deployment_threshold = float(args.probability_threshold) if float(args.probability_threshold) >= 0 else float(threshold)
+                deployed_score = raw_proba
+
+            joblib.dump({
+                'model_name': best_name,
+                'model': final_model,
+                'imputer': imputer,
+                'raw_feature_columns': list(X.columns),
+                'final_feature_columns': corr_keep,
+                'categorical_vocab': spec.categorical_vocab,
+                'numeric_cols': spec.numeric_cols,
+                'categorical_cols': spec.categorical_cols,
+                'threshold_raw_cv': threshold,
+                'deployment_threshold': deployment_threshold,
+                'deployment_score_mode': str(args.deployment_score_mode),
+                'conservative_suitability_spec': conservative_spec,
+            }, model_path)
+
+            pred_stack.append(deployed_score)
+            pred_raw_stack.append(raw_proba)
+            thresholds.append(deployment_threshold)
+            artifacts.append({'group': group, 'slug': slug, 'model_name': best_name, 'threshold': deployment_threshold})
+
+            species_out = pd.DataFrame({
+                args.id_col: grid_work[args.id_col].tolist(),
+                args.x_col: grid_work[args.x_col].tolist(),
+                args.y_col: grid_work[args.y_col].tolist(),
+                'ml_probability_raw': raw_proba,
+                'ml_center_weight': center_weight,
+                'ml_novelty_penalty': novelty_penalty,
+                'ml_adjustment_factor': adjustment_factor,
+                'ml_suitability': conservative_suitability,
+                'ml_probability': deployed_score,
+                'ml_likely': (deployed_score >= deployment_threshold).astype(np.int8),
+                'model_name': best_name,
+            })
+            species_dir = outdir / 'by_species'
+            species_dir.mkdir(parents=True, exist_ok=True)
+            species_out.to_csv(species_dir / f'{slug}.csv', index=False)
+
+            best_row = cv_summary[cv_summary['model'] == best_name].iloc[0]
+            species_rows.append({
+                'group': group,
+                'occurrence_count': int(getattr(row, 'occurrence_count', len(pos_df))),
+                'positive_rows_used': int(len(pos_df)),
+                'background_rows_used': int(len(bg_df)),
+                'background_source': bg_source,
+                'background_sampling_mode': ';'.join(str(part.get('mode', 'mixed')) for part in bg_stats_parts),
+                'background_source_rows': ';'.join(f"{part.get('source', 'unknown')}={int(part.get('rows_selected', 0))}" for part in bg_stats_parts),
+                'background_candidate_global': int(sum(int(part.get('candidate_global', 0)) for part in bg_stats_parts)),
+                'background_candidate_local': int(sum(int(part.get('candidate_local', 0)) for part in bg_stats_parts)),
+                'background_blocked_cells': int(sum(int(part.get('blocked_cells', 0)) for part in bg_stats_parts)),
+                'selected_model': best_name,
+                'threshold_raw_cv': threshold,
+                'deployment_threshold': deployment_threshold,
+                'cv_scheme': str(best_row['cv_scheme']),
+                'cv_roc_auc_mean': float(best_row['cv_roc_auc_mean']),
+                'cv_pr_auc_mean': float(best_row['cv_pr_auc_mean']),
+                'cv_logloss_mean': float(best_row['cv_logloss_mean']),
+                'cv_brier_mean': float(best_row['cv_brier_mean']),
+                'cv_accuracy_mean': float(best_row['cv_accuracy_mean']),
+                'cv_balanced_accuracy_mean': float(best_row['cv_balanced_accuracy_mean']),
+                'cv_f1_mean': float(best_row['cv_f1_mean']),
+                'cv_precision_mean': float(best_row['cv_precision_mean']),
+                'cv_recall_mean': float(best_row['cv_recall_mean']),
+                'oof_roc_auc': float(best_row['oof_roc_auc']),
+                'oof_pr_auc': float(best_row['oof_pr_auc']),
+                'oof_logloss': float(best_row['oof_logloss']),
+                'oof_brier': float(best_row['oof_brier']),
+                'oof_accuracy': float(best_row['oof_accuracy']),
+                'oof_balanced_accuracy': float(best_row['oof_balanced_accuracy']),
+                'oof_f1': float(best_row['oof_f1']),
+                'oof_precision': float(best_row['oof_precision']),
+                'oof_recall': float(best_row['oof_recall']),
+                'cv_fit_seconds_mean': float(best_row['cv_fit_seconds_mean']),
+                'cv_predict_seconds_mean': float(best_row['cv_predict_seconds_mean']),
+                'cv_fit_seconds_total': float(best_row['cv_fit_seconds_total']),
+                'cv_predict_seconds_total': float(best_row['cv_predict_seconds_total']),
+                'feature_count': int(len(corr_keep)),
+                'deployment_feature_count': int(len(conservative_spec.get('features', []))),
+                'deployment_score_mode': str(args.deployment_score_mode),
+                'mean_grid_probability_raw': float(np.nanmean(raw_proba)),
+                'max_grid_probability_raw': float(np.nanmax(raw_proba)),
+                'mean_grid_suitability': float(np.nanmean(conservative_suitability)),
+                'max_grid_suitability': float(np.nanmax(conservative_suitability)),
+                'mean_grid_probability': float(np.nanmean(deployed_score)),
+                'max_grid_probability': float(np.nanmax(deployed_score)),
+                'model_path': str(model_path),
+                'feature_importance_csv': str(feature_path),
+                **{rank: getattr(row, rank, pd.NA) for rank in ['matched_species_name', *TAXON_RANKS] if hasattr(row, rank)},
+            })
+            cv_summary.to_csv(model_comp_dir / f'{slug}.csv', index=False)
+            if not cv_folds_df.empty:
+                cv_folds_df.to_csv(model_comp_dir / f'{slug}_folds.csv', index=False)
+            cv_pr_auc_mean = float(best_row["cv_pr_auc_mean"])
+            cv_f1_mean = float(best_row["cv_f1_mean"])
+            oof_pr_auc = float(best_row["oof_pr_auc"])
+            oof_f1 = float(best_row["oof_f1"])
+            threshold_std = float(best_row["cv_threshold_std"])
+            cv_fit_seconds_total = float(best_row["cv_fit_seconds_total"])
+            cv_predict_seconds_total = float(best_row["cv_predict_seconds_total"])
+            log(
+                f"[fit] group={group} model={best_name} positives={len(pos_df):,} background={len(bg_df):,} features={len(corr_keep):,} "
+                f"cv_pr_auc={cv_pr_auc_mean:.3f} cv_f1={cv_f1_mean:.3f} oof_pr_auc={oof_pr_auc:.3f} oof_f1={oof_f1:.3f} "
+                f"raw_thr={threshold:.3f} deploy_thr={deployment_threshold:.3f} thr_sd={threshold_std:.3f} fit_s={cv_fit_seconds_total:.2f} pred_s={cv_predict_seconds_total:.2f}"
             )
-            if len(grid_idx) > 0:
-                bg_parts.append(grid_work.iloc[grid_idx].copy().reset_index(drop=True))
-            grid_stats['source'] = 'grid'
-            grid_stats['rows_selected'] = int(len(grid_idx))
-            bg_stats_parts.append(grid_stats)
-        if not bg_parts:
-            log(f'[skip] group={group} insufficient background candidates after spatial filtering background_rows=0')
-            continue
-        bg_df = pd.concat(bg_parts, ignore_index=True)
-        if len(bg_df) > int(bg_target):
-            choose_idx = np.sort(rng.choice(np.arange(len(bg_df), dtype=np.int64), size=int(bg_target), replace=False))
-            bg_df = bg_df.iloc[choose_idx].reset_index(drop=True)
-        if len(bg_df) < max(2, int(args.min_background * 0.5)):
-            log(f'[skip] group={group} insufficient background candidates after spatial filtering background_rows={len(bg_df)}')
-            continue
 
-        pos_x = transform_features(pos_df, spec)
-        bg_x = transform_features(bg_df, spec)
-        y = np.concatenate([np.ones(len(pos_x), dtype=np.int8), np.zeros(len(bg_x), dtype=np.int8)])
-        X = pd.concat([pos_x, bg_x], axis=0, ignore_index=True)
-        coords_x = np.concatenate([pd.to_numeric(pos_df[args.occ_x_col], errors='coerce').to_numpy(dtype=float), pd.to_numeric(bg_df[args.x_col], errors='coerce').to_numpy(dtype=float)])
-        coords_y = np.concatenate([pd.to_numeric(pos_df[args.occ_y_col], errors='coerce').to_numpy(dtype=float), pd.to_numeric(bg_df[args.y_col], errors='coerce').to_numpy(dtype=float)])
+        if not pred_stack:
+            raise RuntimeError('No models were fitted. Check taxon filters and occurrence counts.')
 
-        subset_idx = stratified_cap_rows(y, int(args.feature_select_max_rows), int(args.random_state))
-        X_select = X.iloc[subset_idx].copy()
-        keep = variance_filter(X_select, threshold=float(args.variance_threshold))
-        if not keep:
-            log(f'[skip] group={group} no features survived variance filter')
-            continue
-        X = X[keep].copy()
-        X_select = X_select[keep].copy()
+        pred_arr = np.vstack(pred_stack).astype(np.float32)
+        pred_raw_arr = np.vstack(pred_raw_stack).astype(np.float32)
+        pred_valid = np.isfinite(pred_arr)
+        pred_raw_valid = np.isfinite(pred_raw_arr)
+        group_names = [a['group'] for a in artifacts]
+        n_rows = pred_arr.shape[1]
+        safe_pred = np.where(pred_valid, pred_arr, -np.inf)
+        safe_pred_raw = np.where(pred_raw_valid, pred_raw_arr, -np.inf)
+        top_idx = np.argmax(safe_pred, axis=0)
+        top_score = safe_pred[top_idx, np.arange(n_rows)]
+        top_group = np.array([group_names[i] for i in top_idx], dtype=object)
+        no_score = ~np.isfinite(top_score) | (top_score == -np.inf)
+        top_score = np.where(no_score, np.nan, top_score)
+        top_group = np.where(no_score, '', top_group)
 
-        imputer = SimpleImputer(strategy='median')
-        X_imp = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
-        X_select_imp = X_imp.iloc[subset_idx].reset_index(drop=True)
-        corr_keep = correlation_prune(X_select_imp, X_select_imp.columns, threshold=float(args.corr_threshold))
-        corr_keep = sorted(corr_keep, key=lambda c: (-float(spec.feature_priority.get(c.split('__', 1)[0], 0.0)), c))
-        if int(args.max_features_after_corr) > 0:
-            corr_keep = corr_keep[:int(args.max_features_after_corr)]
-        if not corr_keep:
-            log(f'[skip] group={group} no features survived correlation prune')
-            continue
-        X_final = X_imp[corr_keep].copy()
+        overall_ml = np.max(safe_pred, axis=0)
+        overall_ml = np.where(np.isfinite(overall_ml) & (overall_ml > -np.inf), overall_ml, np.nan).astype(np.float32)
+        overall_ml_raw = np.max(safe_pred_raw, axis=0)
+        overall_ml_raw = np.where(np.isfinite(overall_ml_raw) & (overall_ml_raw > -np.inf), overall_ml_raw, np.nan).astype(np.float32)
+        overall_ml_min = finite_min_score(pred_arr, pred_valid)
+        overall_ml_joint = joint_support_score(pred_arr, pred_valid, min_share=args.joint_min_share, tail_fraction=args.joint_tail_fraction, rank_power=args.joint_rank_power)
+        threshold_arr = np.asarray(thresholds, dtype=np.float32)[:, None]
+        richness_ml = np.sum(np.where(pred_valid, pred_arr >= threshold_arr, False), axis=0).astype(np.int32)
 
-        scale_pos_weight = float(max(1.0, len(bg_x) / max(1, len(pos_x))))
-        estimator_map = build_estimators(args, scale_pos_weight)
-        if not estimator_map:
-            raise RuntimeError('No estimators available')
-        best_name, cv_summary, cv_folds_df = evaluate_candidate_models(X_final, y, coords_x, coords_y, args, estimator_map)
-        final_model = fit_final_model(X_final, y, estimator_map, best_name)
-        threshold = float(args.probability_threshold) if float(args.probability_threshold) >= 0 else float(cv_summary.loc[cv_summary['model'] == best_name, 'cv_threshold_median'].iloc[0])
-
-        perm_idx = stratified_cap_rows(y, min(len(y), 12000), int(args.random_state))
-        perm_X = X_final.iloc[perm_idx].reset_index(drop=True)
-        perm_y = y[perm_idx]
-        perm = permutation_importance(final_model, perm_X, perm_y, n_repeats=5, random_state=int(args.random_state), scoring='average_precision', n_jobs=-1)
-        perm_df = pd.DataFrame({'feature': corr_keep, 'perm_importance_mean': perm.importances_mean, 'perm_importance_std': perm.importances_std})
-        perm_df = perm_df.sort_values(['perm_importance_mean', 'feature'], ascending=[False, True]).reset_index(drop=True)
-
-        model_dir = outdir / 'models'
-        model_dir.mkdir(parents=True, exist_ok=True)
-        imp_dir = outdir / 'feature_importance'
-        imp_dir.mkdir(parents=True, exist_ok=True)
-        slug = safe_slug(group)
-        model_path = model_dir / f'{slug}.joblib'
-        feature_path = imp_dir / f'{slug}.csv'
-        joblib.dump({
-            'model_name': best_name,
-            'model': final_model,
-            'imputer': imputer,
-            'raw_feature_columns': list(X.columns),
-            'final_feature_columns': corr_keep,
-            'categorical_vocab': spec.categorical_vocab,
-            'numeric_cols': spec.numeric_cols,
-            'categorical_cols': spec.categorical_cols,
-            'threshold': threshold,
-        }, model_path)
-        perm_df.to_csv(feature_path, index=False)
-
-        grid_X_all = transform_features(grid_work, spec)
-        grid_X_imp = pd.DataFrame(imputer.transform(grid_X_all[X.columns]), columns=X.columns)
-        grid_X_final = grid_X_imp[corr_keep]
-        proba = predict_in_chunks(final_model, grid_X_final, int(args.predict_chunk_size))
-
-        pred_stack.append(proba)
-        thresholds.append(threshold)
-        artifacts.append({'group': group, 'slug': slug, 'model_name': best_name, 'threshold': threshold})
-
-        species_out = pd.DataFrame({
+        overall_df = pd.DataFrame({
             args.id_col: grid_work[args.id_col].tolist(),
             args.x_col: grid_work[args.x_col].tolist(),
             args.y_col: grid_work[args.y_col].tolist(),
-            'ml_suitability': proba,
-            'ml_probability': proba,
-            'ml_likely': (proba >= threshold).astype(np.int8),
-            'model_name': best_name,
+            'overall_ml_raw': overall_ml_raw,
+            'overall_ml_suitability': overall_ml,
+            'overall_ml': overall_ml,
+            'overall_ml_min': overall_ml_min,
+            'overall_ml_joint': overall_ml_joint,
+            'richness_ml': richness_ml,
+            'top_group_ml': top_group,
+            'top_ml_score': top_score,
         })
-        species_dir = outdir / 'by_species'
-        species_dir.mkdir(parents=True, exist_ok=True)
-        species_out.to_csv(species_dir / f'{slug}.csv', index=False)
+        overall_df.to_csv(outdir / 'overall_suitability.csv', index=False)
 
-        best_row = cv_summary[cv_summary['model'] == best_name].iloc[0]
-        species_rows.append({
-            'group': group,
-            'occurrence_count': int(getattr(row, 'occurrence_count', len(pos_df))),
-            'positive_rows_used': int(len(pos_df)),
-            'background_rows_used': int(len(bg_df)),
-            'background_source': bg_source,
-            'background_sampling_mode': ';'.join(str(part.get('mode', 'mixed')) for part in bg_stats_parts),
-            'background_source_rows': ';'.join(f"{part.get('source', 'unknown')}={int(part.get('rows_selected', 0))}" for part in bg_stats_parts),
-            'background_candidate_global': int(sum(int(part.get('candidate_global', 0)) for part in bg_stats_parts)),
-            'background_candidate_local': int(sum(int(part.get('candidate_local', 0)) for part in bg_stats_parts)),
-            'background_blocked_cells': int(sum(int(part.get('blocked_cells', 0)) for part in bg_stats_parts)),
-            'selected_model': best_name,
-            'threshold': threshold,
-            'cv_scheme': str(best_row['cv_scheme']),
-            'cv_roc_auc_mean': float(best_row['cv_roc_auc_mean']),
-            'cv_pr_auc_mean': float(best_row['cv_pr_auc_mean']),
-            'cv_logloss_mean': float(best_row['cv_logloss_mean']),
-            'cv_brier_mean': float(best_row['cv_brier_mean']),
-            'cv_accuracy_mean': float(best_row['cv_accuracy_mean']),
-            'cv_balanced_accuracy_mean': float(best_row['cv_balanced_accuracy_mean']),
-            'cv_f1_mean': float(best_row['cv_f1_mean']),
-            'cv_precision_mean': float(best_row['cv_precision_mean']),
-            'cv_recall_mean': float(best_row['cv_recall_mean']),
-            'oof_roc_auc': float(best_row['oof_roc_auc']),
-            'oof_pr_auc': float(best_row['oof_pr_auc']),
-            'oof_logloss': float(best_row['oof_logloss']),
-            'oof_brier': float(best_row['oof_brier']),
-            'oof_accuracy': float(best_row['oof_accuracy']),
-            'oof_balanced_accuracy': float(best_row['oof_balanced_accuracy']),
-            'oof_f1': float(best_row['oof_f1']),
-            'oof_precision': float(best_row['oof_precision']),
-            'oof_recall': float(best_row['oof_recall']),
-            'cv_fit_seconds_mean': float(best_row['cv_fit_seconds_mean']),
-            'cv_predict_seconds_mean': float(best_row['cv_predict_seconds_mean']),
-            'cv_fit_seconds_total': float(best_row['cv_fit_seconds_total']),
-            'cv_predict_seconds_total': float(best_row['cv_predict_seconds_total']),
-            'feature_count': int(len(corr_keep)),
-            'mean_grid_probability': float(np.nanmean(proba)),
-            'max_grid_probability': float(np.nanmax(proba)),
-            'model_path': str(model_path),
-            'feature_importance_csv': str(feature_path),
-            **{rank: getattr(row, rank, pd.NA) for rank in ['matched_species_name', *TAXON_RANKS] if hasattr(row, rank)},
-        })
-        cv_summary.to_csv(model_comp_dir / f'{slug}.csv', index=False)
-        if not cv_folds_df.empty:
-            cv_folds_df.to_csv(model_comp_dir / f'{slug}_folds.csv', index=False)
-        cv_pr_auc_mean = float(best_row["cv_pr_auc_mean"])
-        cv_f1_mean = float(best_row["cv_f1_mean"])
-        oof_pr_auc = float(best_row["oof_pr_auc"])
-        oof_f1 = float(best_row["oof_f1"])
-        threshold_std = float(best_row["cv_threshold_std"])
-        cv_fit_seconds_total = float(best_row["cv_fit_seconds_total"])
-        cv_predict_seconds_total = float(best_row["cv_predict_seconds_total"])
-        log(
-            f"[fit] group={group} model={best_name} positives={len(pos_df):,} background={len(bg_df):,} features={len(corr_keep):,} "
-            f"cv_pr_auc={cv_pr_auc_mean:.3f} cv_f1={cv_f1_mean:.3f} oof_pr_auc={oof_pr_auc:.3f} oof_f1={oof_f1:.3f} "
-            f"thr={threshold:.3f} thr_sd={threshold_std:.3f} fit_s={cv_fit_seconds_total:.2f} pred_s={cv_predict_seconds_total:.2f}"
-        )
+        species_summary_df = pd.DataFrame(species_rows).sort_values(['mean_grid_probability', 'max_grid_probability', 'group'], ascending=[False, False, True]).reset_index(drop=True)
+        species_summary_df.to_csv(outdir / 'species_score_summary.csv', index=False)
 
-    if not pred_stack:
-        raise RuntimeError('No models were fitted. Check taxon filters and occurrence counts.')
+        if int(args.preview_top_n) > 0:
+            preview_dir = outdir / 'previews'
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            preview_point_map(overall_df, 'overall_ml', 'overall ML suitability', preview_dir / 'overall_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_ml_min', 'overall ML minimum overlap', preview_dir / 'overall_ml_min.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_ml_joint', 'overall ML joint suitability', preview_dir / 'overall_ml_joint.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'richness_ml', 'richness above species thresholds', preview_dir / 'richness_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+            for row in species_summary_df.head(int(args.preview_top_n)).itertuples(index=False):
+                dfp = pd.read_csv(outdir / 'by_species' / f"{safe_slug(row.group)}.csv", usecols=[args.x_col, args.y_col, 'ml_probability'], low_memory=False)
+                preview_point_map(dfp, 'ml_probability', f'{row.group} ML suitability', preview_dir / 'by_species' / f"{safe_slug(row.group)}_ml.png", args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
 
-    pred_arr = np.vstack(pred_stack).astype(np.float32)
-    pred_valid = np.isfinite(pred_arr)
-    group_names = [a['group'] for a in artifacts]
-    n_rows = pred_arr.shape[1]
-    safe_pred = np.where(pred_valid, pred_arr, -np.inf)
-    top_idx = np.argmax(safe_pred, axis=0)
-    top_score = safe_pred[top_idx, np.arange(n_rows)]
-    top_group = np.array([group_names[i] for i in top_idx], dtype=object)
-    no_score = ~np.isfinite(top_score) | (top_score == -np.inf)
-    top_score = np.where(no_score, np.nan, top_score)
-    top_group = np.where(no_score, '', top_group)
-
-    overall_ml = np.max(safe_pred, axis=0)
-    overall_ml = np.where(np.isfinite(overall_ml) & (overall_ml > -np.inf), overall_ml, np.nan).astype(np.float32)
-    overall_ml_min = finite_min_score(pred_arr, pred_valid)
-    overall_ml_joint = joint_support_score(pred_arr, pred_valid, min_share=args.joint_min_share, tail_fraction=args.joint_tail_fraction, rank_power=args.joint_rank_power)
-    threshold_arr = np.asarray(thresholds, dtype=np.float32)[:, None]
-    richness_ml = np.sum(np.where(pred_valid, pred_arr >= threshold_arr, False), axis=0).astype(np.int32)
-
-    overall_df = pd.DataFrame({
-        args.id_col: grid_work[args.id_col].tolist(),
-        args.x_col: grid_work[args.x_col].tolist(),
-        args.y_col: grid_work[args.y_col].tolist(),
-        'overall_ml_suitability': overall_ml,
-        'overall_ml': overall_ml,
-        'overall_ml_min': overall_ml_min,
-        'overall_ml_joint': overall_ml_joint,
-        'richness_ml': richness_ml,
-        'top_group_ml': top_group,
-        'top_ml_score': top_score,
-    })
-    overall_df.to_csv(outdir / 'overall_suitability.csv', index=False)
-
-    species_summary_df = pd.DataFrame(species_rows).sort_values(['mean_grid_probability', 'max_grid_probability', 'group'], ascending=[False, False, True]).reset_index(drop=True)
-    species_summary_df.to_csv(outdir / 'species_score_summary.csv', index=False)
-
-    if int(args.preview_top_n) > 0:
-        preview_dir = outdir / 'previews'
-        preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_point_map(overall_df, 'overall_ml', 'overall ML suitability', preview_dir / 'overall_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax)
-        preview_point_map(overall_df, 'overall_ml_min', 'overall ML minimum overlap', preview_dir / 'overall_ml_min.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax)
-        preview_point_map(overall_df, 'overall_ml_joint', 'overall ML joint suitability', preview_dir / 'overall_ml_joint.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax)
-        preview_point_map(overall_df, 'richness_ml', 'richness above species thresholds', preview_dir / 'richness_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
-        for row in species_summary_df.head(int(args.preview_top_n)).itertuples(index=False):
-            dfp = pd.read_csv(outdir / 'by_species' / f"{safe_slug(row.group)}.csv", usecols=[args.x_col, args.y_col, 'ml_probability'], low_memory=False)
-            preview_point_map(dfp, 'ml_probability', f'{row.group} ML suitability', preview_dir / 'by_species' / f"{safe_slug(row.group)}_ml.png", args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax)
+    community_manifest = {'enabled': False, 'status': 'not_requested'}
+    if bool(getattr(args, 'train_community_model', False)):
+        community_manifest = train_and_write_community_model(outdir, args, spec, group_meta, occ_work, grid_work)
 
     manifest = {
         'occurrences_csv': str(occ_csv),
@@ -1520,6 +2272,7 @@ def main() -> int:
         'exclude_taxa': [s.raw for s in exclude_selectors],
         'selected_group_count': int(len(artifacts)),
         'selected_groups': group_names,
+        'community_only': bool(getattr(args, 'community_only', False)),
         'numeric_feature_count': int(len(spec.numeric_cols)),
         'categorical_feature_count': int(len(spec.categorical_cols)),
         'encoded_feature_count': int(len(spec.encoded_columns)),
@@ -1549,7 +2302,8 @@ def main() -> int:
         'joint_tail_fraction': float(args.joint_tail_fraction),
         'joint_rank_power': float(args.joint_rank_power),
         'available_models': sorted(list(build_estimators(args, 1.0).keys())),
-        'score_interpretation': 'Presence-background relative suitability score. This is not a true occurrence probability unless true absences and prevalence assumptions are provided.',
+        'community_model': community_manifest,
+        'score_interpretation': 'Presence-background relative suitability score. ml_probability_raw is the raw tree score. ml_suitability is the conservative center-weighted score intended for deployment and blending. This is not a true occurrence probability unless true absences and prevalence assumptions are provided.',
     }
     write_manifest(outdir / 'manifest.json', manifest)
     log(f'[done] groups={len(artifacts)} grid_rows={len(grid_work):,} outdir={outdir}')

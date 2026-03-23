@@ -1237,6 +1237,26 @@ def _coarsen_regular_grid(grid: np.ndarray, x_edges: np.ndarray, y_edges: np.nda
     return coarse, x_edges2, y_edges2
 
 
+def preview_is_suitability_like(value_col: str, title: str) -> bool:
+    value_key = str(value_col).strip().lower()
+    title_key = str(title).strip().lower()
+    joined = f"{value_key} {title_key}"
+    if "richness" in joined or "reliability" in joined:
+        return False
+    suitability_tokens = (
+        "suitability",
+        "_score",
+        "score_",
+        "core",
+        "adjusted",
+        "standardized",
+        "joint",
+        "min_",
+        "_min",
+    )
+    return any(token in joined for token in suitability_tokens)
+
+
 def preview_color_limits(value_col: str, title: str, suitability_vmax: Optional[float] = DEFAULT_PREVIEW_SUITABILITY_VMAX) -> Tuple[Optional[float], Optional[float]]:
     value_key = str(value_col).strip().lower()
     title_key = str(title).strip().lower()
@@ -1245,20 +1265,26 @@ def preview_color_limits(value_col: str, title: str, suitability_vmax: Optional[
         return None, None
     if "reliability" in joined:
         return 0.0, 1.0
-    suitability_tokens = (
-        "suitability",
-        "_score",
-        "score_",
-        "core",
-        "adjusted",
-        "standardized",
-    )
-    if any(token in joined for token in suitability_tokens):
+    if preview_is_suitability_like(value_col, title):
         vmax = pd.to_numeric(suitability_vmax, errors="coerce")
         if pd.notna(vmax) and float(vmax) > 0:
             return 0.0, float(vmax)
         return None, None
     return None, None
+
+
+def apply_preview_minimum_score_threshold(df: pd.DataFrame, value_col: str, title: str, threshold: float) -> pd.DataFrame:
+    thr = pd.to_numeric(threshold, errors="coerce")
+    if pd.isna(thr) or float(thr) <= 0.0:
+        return df
+    if not preview_is_suitability_like(value_col, title):
+        return df
+    out = df.copy()
+    values = pd.to_numeric(out[value_col], errors="coerce")
+    valid = values.notna()
+    values.loc[valid & (values < float(thr))] = 0.0
+    out[value_col] = values
+    return out
 
 
 def lower_tail_weighted_mean(values: np.ndarray, valid: np.ndarray, tail_fraction: float = 0.25, rank_power: float = 1.5) -> np.ndarray:
@@ -1325,7 +1351,7 @@ def finite_min_score(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(out), out, np.nan).astype(np.float32)
 
 
-def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Path, x_col: str, y_col: str, point_size: float = 4.0, point_alpha: float = 0.35, preview_coarsen: int = 4, suitability_vmax: Optional[float] = DEFAULT_PREVIEW_SUITABILITY_VMAX) -> None:
+def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Path, x_col: str, y_col: str, point_size: float = 4.0, point_alpha: float = 0.35, preview_coarsen: int = 4, suitability_vmax: Optional[float] = DEFAULT_PREVIEW_SUITABILITY_VMAX, preview_minimum_score_threshold: float = 0.0) -> None:
     if plt is None:
         return
     if value_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
@@ -1334,6 +1360,7 @@ def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Pa
     sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
     sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
     sub[value_col] = pd.to_numeric(sub[value_col], errors="coerce")
+    sub = apply_preview_minimum_score_threshold(sub, value_col, title, preview_minimum_score_threshold)
     sub = sub.dropna(subset=[x_col, y_col, value_col])
     if sub.empty:
         return
@@ -1390,6 +1417,105 @@ def preview_point_map(df: pd.DataFrame, value_col: str, title: str, out_path: Pa
     plt.close(fig)
 
 
+def generate_previews_from_existing_outputs(outdir: Path, args) -> None:
+    if plt is None:
+        log('[previews] matplotlib not available; skipping previews')
+        return
+    outdir = Path(outdir)
+    previews_root = outdir / 'previews'
+    previews_root.mkdir(parents=True, exist_ok=True)
+
+    overall_path = outdir / 'overall_suitability.csv'
+    if overall_path.exists():
+        try:
+            overall_df = pd.read_csv(
+                overall_path,
+                usecols=[
+                    args.x_col,
+                    args.y_col,
+                    'overall_core',
+                    'overall_adjusted',
+                    'overall_core_min',
+                    'overall_adjusted_min',
+                    'overall_adjusted_joint',
+                    'overall_reliability_mean',
+                    'richness_adjusted',
+                ],
+                low_memory=False,
+            )
+        except Exception:
+            overall_df = pd.DataFrame()
+        if not overall_df.empty:
+            preview_point_map(overall_df, 'overall_core', 'overall core suitability', previews_root / 'overall_core.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_adjusted', 'overall adjusted suitability', previews_root / 'overall_adjusted.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_core_min', 'overall core minimum overlap', previews_root / 'overall_core_min.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_adjusted_min', 'overall adjusted minimum overlap', previews_root / 'overall_adjusted_min.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_adjusted_joint', 'overall joint adjusted suitability', previews_root / 'overall_adjusted_joint.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'overall_reliability_mean', 'overall reliability mean', previews_root / 'overall_reliability_mean.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(overall_df, 'richness_adjusted', 'richness above threshold (adjusted)', previews_root / 'richness_adjusted.png', args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+
+    if int(args.preview_top_n) <= 0:
+        return
+
+    by_species_dir = outdir / 'by_species'
+    if not by_species_dir.exists():
+        return
+
+    ranking_path = outdir / 'species_score_summary.csv'
+    groups = []
+    if ranking_path.exists():
+        try:
+            ranking = pd.read_csv(ranking_path, low_memory=False)
+            if 'group' in ranking.columns:
+                groups = ranking['group'].astype(str).tolist()
+        except Exception:
+            groups = []
+    if not groups:
+        groups = sorted([p.stem for p in by_species_dir.glob('*.csv')])
+
+    limit = int(args.preview_top_n)
+    groups = groups[:limit] if limit > 0 else groups
+    out_base = previews_root / 'by_species'
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    for group in groups:
+        src = by_species_dir / f"{safe_slug(group)}.csv"
+        if not src.exists():
+            alt = by_species_dir / f"{group}.csv"
+            if alt.exists():
+                src = alt
+            else:
+                continue
+        try:
+            dfp = pd.read_csv(src, usecols=[args.x_col, args.y_col, 'adjusted_score', 'core_score', 'reliability'], low_memory=False)
+        except Exception:
+            continue
+        if dfp.empty:
+            continue
+        preview_point_map(dfp, 'adjusted_score', f"{group} stress-adjusted suitability", out_base / f"{safe_slug(group)}_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(dfp, 'core_score', f"{group} core suitability", out_base / f"{safe_slug(group)}_core.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(dfp, 'reliability', f"{group} reliability", out_base / f"{safe_slug(group)}_reliability.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+
+    rank_dirs = [d for d in outdir.iterdir() if d.is_dir() and d.name.startswith('by_') and d.name not in ('by_species',)]
+    rank_dirs.sort(key=lambda d: d.name)
+    generated = 0
+    for d in rank_dirs:
+        rank_key = d.name.replace('by_', '', 1)
+        for src in sorted(d.glob('*.csv')):
+            if generated >= 24:
+                return
+            try:
+                dfp = pd.read_csv(src, usecols=[args.x_col, args.y_col, 'min_adjusted', 'joint_adjusted'], low_memory=False)
+            except Exception:
+                continue
+            if dfp.empty:
+                continue
+            value = src.stem
+            preview_point_map(dfp, 'min_adjusted', f"{rank_key} {value} min adjusted suitability", previews_root / f"by_{rank_key}" / f"{safe_slug(value)}_min_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            preview_point_map(dfp, 'joint_adjusted', f"{rank_key} {value} joint adjusted suitability", previews_root / f"by_{rank_key}" / f"{safe_slug(value)}_joint_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+            generated += 1
+
+
 def write_manifest(out_path: Path, payload: Dict[str, object]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1443,10 +1569,11 @@ def append_histogram(hist: np.ndarray, values: np.ndarray, bins: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build generalized envelope-based suitability maps with core fit, stress adjustment, reliability, and standardized stacked outputs.")
-    ap.add_argument("occurrences_csv", help="Cleaned enriched occurrence CSV, usually occurrences_enriched.cleaned.csv")
-    ap.add_argument("grid_csv", help="Cleaned enriched grid CSV, usually grid_with_env.csv")
+    ap.add_argument("occurrences_csv", nargs='?', default=None, help="Cleaned enriched occurrence CSV, usually occurrences_enriched.cleaned.csv")
+    ap.add_argument("grid_csv", nargs='?', default=None, help="Cleaned enriched grid CSV, usually grid_with_env.csv")
     ap.add_argument("--trend-summary", default=None, help="Directory with aggregate_occurrence_trends.py outputs. Defaults to <occurrences_csv_dir>/trend_summary")
     ap.add_argument("--outdir", required=True, help="Output directory")
+    ap.add_argument("--make-previews", action="store_true", help="Generate preview PNGs from existing outputs under --outdir without recomputing suitability scores")
     ap.add_argument("--group-by", default="matched_species_name", help="Grouping column used in the trend summary, usually matched_species_name")
     ap.add_argument("--include-taxa", nargs="*", default=None, help="Optional rank selectors such as family:Rosaceae genus:Ribes species:Daucus pusillus")
     ap.add_argument("--exclude-taxa", nargs="*", default=None, help="Optional rank selectors to exclude")
@@ -1478,6 +1605,7 @@ def main() -> int:
     ap.add_argument("--preview-coarsen", type=int, default=2, help="Display-only raster coarsening factor for preview PNGs; 2 makes cells about twice as large")
     ap.add_argument("--preview-point-alpha", type=float, default=0.35, help="Scatter-point alpha for preview PNGs when they are rendered as points instead of a regular grid")
     ap.add_argument("--preview-suitability-vmax", type=float, default=DEFAULT_PREVIEW_SUITABILITY_VMAX, help="Upper color limit used for suitability-style preview maps; set <= 0 to disable fixed scaling for those previews")
+    ap.add_argument("--preview-minimum-score-threshold", type=float, default=0.0, help="Preview-only threshold that sets suitability-style values below this level to 0 in generated PNGs without modifying CSV outputs")
     ap.add_argument("--joint-min-share", type=float, default=0.7, help="Share of the joint aggregate anchored to the per-cell minimum across contributing groups")
     ap.add_argument("--joint-tail-fraction", type=float, default=0.25, help="Fraction of the lowest-scoring groups blended into the joint aggregate at each cell")
     ap.add_argument("--joint-rank-power", type=float, default=1.5, help="Rank-decay exponent used when averaging the lower tail for joint aggregate outputs")
@@ -1485,14 +1613,22 @@ def main() -> int:
     ap.add_argument("--no-reliability-adjustment", action="store_true", help="Disable novelty/reliability adjustment")
     ap.add_argument("--no-per-species", action="store_true", help="Skip writing one CSV per selected group")
     ap.add_argument("--per-species-top-n", type=int, default=0, help="Write per-species outputs only for the top N selected groups; 0 keeps all")
-    ap.add_argument("--preview-top-n", type=int, default=8, help="Generate quick preview PNGs for the top N per-species maps by mean adjusted suitability; 0 disables")
+    ap.add_argument("--preview-top-n", type=int, default=500000, help="Generate quick preview PNGs for the top N per-species maps by mean adjusted suitability; 0 disables")
     args = ap.parse_args()
+
+    outdir = Path(args.outdir).resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if bool(args.make_previews):
+        generate_previews_from_existing_outputs(outdir, args)
+        return 0
+
+    if not args.occurrences_csv or not args.grid_csv:
+        raise ValueError('occurrences_csv and grid_csv are required unless --make-previews is set')
 
     occurrences_csv = Path(args.occurrences_csv).resolve()
     grid_csv = Path(args.grid_csv).resolve()
     trend_summary_dir = infer_trend_summary_dir(occurrences_csv, Path(args.trend_summary).resolve() if args.trend_summary else None)
-    outdir = Path(args.outdir).resolve()
-    outdir.mkdir(parents=True, exist_ok=True)
 
     if not occurrences_csv.exists():
         raise FileNotFoundError(f"Missing occurrences_csv: {occurrences_csv}")
@@ -1986,13 +2122,13 @@ def main() -> int:
 
     overall_preview_df = pd.concat(preview_cache_overall, ignore_index=True) if preview_cache_overall else pd.DataFrame()
     if not overall_preview_df.empty:
-        preview_point_map(overall_preview_df, "overall_core", "overall core suitability", outdir / "previews" / "overall_core.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(overall_preview_df, "overall_adjusted", "overall adjusted suitability", outdir / "previews" / "overall_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(overall_preview_df, "overall_core_min", "overall core minimum overlap", outdir / "previews" / "overall_core_min.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(overall_preview_df, "overall_adjusted_min", "overall adjusted minimum overlap", outdir / "previews" / "overall_adjusted_min.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(overall_preview_df, "overall_adjusted_joint", "overall joint adjusted suitability", outdir / "previews" / "overall_adjusted_joint.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(overall_preview_df, "overall_reliability_mean", "overall reliability mean", outdir / "previews" / "overall_reliability_mean.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(overall_preview_df, "richness_adjusted", "richness above threshold (adjusted)", outdir / "previews" / "richness_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
+        preview_point_map(overall_preview_df, "overall_core", "overall core suitability", outdir / "previews" / "overall_core.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(overall_preview_df, "overall_adjusted", "overall adjusted suitability", outdir / "previews" / "overall_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(overall_preview_df, "overall_core_min", "overall core minimum overlap", outdir / "previews" / "overall_core_min.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(overall_preview_df, "overall_adjusted_min", "overall adjusted minimum overlap", outdir / "previews" / "overall_adjusted_min.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(overall_preview_df, "overall_adjusted_joint", "overall joint adjusted suitability", outdir / "previews" / "overall_adjusted_joint.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(overall_preview_df, "overall_reliability_mean", "overall reliability mean", outdir / "previews" / "overall_reliability_mean.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(overall_preview_df, "richness_adjusted", "richness above threshold (adjusted)", outdir / "previews" / "richness_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
 
     if args.preview_top_n > 0 and preview_cache_species:
         species_preview_order = species_summary_df.head(int(args.preview_top_n)) if not species_summary_df.empty else pd.DataFrame()
@@ -2004,16 +2140,16 @@ def main() -> int:
                 if not cached:
                     continue
                 dfp = pd.concat(cached, ignore_index=True)
-                preview_point_map(dfp, "adjusted_score", f"{group} stress-adjusted suitability", outdir / "previews" / "by_species" / f"{safe_slug(group)}_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-                preview_point_map(dfp, "core_score", f"{group} core suitability", outdir / "previews" / "by_species" / f"{safe_slug(group)}_core.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-                preview_point_map(dfp, "reliability", f"{group} reliability", outdir / "previews" / "by_species" / f"{safe_slug(group)}_reliability.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
+                preview_point_map(dfp, "adjusted_score", f"{group} stress-adjusted suitability", outdir / "previews" / "by_species" / f"{safe_slug(group)}_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+                preview_point_map(dfp, "core_score", f"{group} core suitability", outdir / "previews" / "by_species" / f"{safe_slug(group)}_core.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+                preview_point_map(dfp, "reliability", f"{group} reliability", outdir / "previews" / "by_species" / f"{safe_slug(group)}_reliability.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
 
     for (rank_key, value), cached_frames in list(preview_cache_rank.items())[:24]:
         if not cached_frames:
             continue
         dfp = pd.concat(cached_frames, ignore_index=True)
-        preview_point_map(dfp, "min_adjusted", f"{rank_key} {value} min adjusted suitability", outdir / "previews" / f"by_{rank_key}" / f"{safe_slug(value)}_min_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
-        preview_point_map(dfp, "joint_adjusted", f"{rank_key} {value} joint adjusted suitability", outdir / "previews" / f"by_{rank_key}" / f"{safe_slug(value)}_joint_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax)
+        preview_point_map(dfp, "min_adjusted", f"{rank_key} {value} min adjusted suitability", outdir / "previews" / f"by_{rank_key}" / f"{safe_slug(value)}_min_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
+        preview_point_map(dfp, "joint_adjusted", f"{rank_key} {value} joint adjusted suitability", outdir / "previews" / f"by_{rank_key}" / f"{safe_slug(value)}_joint_adjusted.png", args.x_col, args.y_col, point_alpha=args.preview_point_alpha, preview_coarsen=args.preview_coarsen, suitability_vmax=args.preview_suitability_vmax, preview_minimum_score_threshold=args.preview_minimum_score_threshold)
 
     manifest = {
         "occurrences_csv": str(occurrences_csv),
