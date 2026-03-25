@@ -36,6 +36,8 @@ except Exception:
 
 # py xgboost_suitability.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/ml_association_test_conservative_final --group-by matched_species_name --background-source mixed --background-sampling regional --cv-block-size 1.0 --cv-buffer-blocks 1
 # py xgboost_suitability.py D:/envpull_association_test/occurrences_enriched.csv D:/Oregon_Suitability/oregon_grid_1000m_env/grid_with_env.csv --trend-summary D:/envpull_association_test/trend_summary --outdir D:/Oregon_Suitability/oregon_grid_1000m_env/ml_association_test_conservative_final_all_but_excluded --group-by matched_species_name --background-source mixed --background-sampling regional --cv-block-size 1.0 --cv-buffer-blocks 1 --exclude-taxa "species:Acer rubrum" "species:Pseudotsuga menziesii" "species:Epifagus virginiana" "species:Fagus grandifolia" "species:Alnus rubra" "species:Kopsiopsis strobilacea" "species:Arbutus menziesii"
+# py xgboost_suitability.py --reuse-models-from D:/Suitability/alaska_1000m/ml_association_full D:/Suitability/fnsb/grid_with_env.csv --outdir D:/Suitability/fnsb/ml_from_full_alaska --group-by matched_species_name --include-taxa "species:Populus balsamifera" "species:Picea glauca"
+# py xgboost_suitability.py --reuse-models-from D:/Suitability/alaska_1000m/ml_association_full --deploy-grid-csv D:/Suitability/fnsb/grid_with_env.csv --outdir D:/Suitability/fnsb/ml_from_full_alaska --group-by matched_species_name
 
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 MONTH_NUMBERS = [f"{i:02d}" for i in range(1, 13)]
@@ -1163,6 +1165,376 @@ def write_manifest(path: Path, payload: Dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
 
 
+
+def build_feature_spec_from_saved_payload(payload: Dict[str, object]) -> FeatureSpec:
+    numeric_cols = [str(col) for col in payload.get('numeric_cols', []) if str(col)]
+    categorical_cols = [str(col) for col in payload.get('categorical_cols', []) if str(col)]
+    raw_feature_columns = [str(col) for col in payload.get('raw_feature_columns', []) if str(col)]
+    categorical_vocab: Dict[str, List[str]] = {}
+    for key, values in (payload.get('categorical_vocab') or {}).items():
+        norm_values = []
+        for value in values or []:
+            nv = normalize_text(value)
+            if nv and nv not in norm_values:
+                norm_values.append(nv)
+        categorical_vocab[str(key)] = norm_values
+    encoded_columns = list(raw_feature_columns)
+    if not encoded_columns:
+        encoded_columns = list(numeric_cols)
+        for col in categorical_cols:
+            for value in categorical_vocab.get(col, []):
+                encoded_columns.append(f"{col}__{safe_slug(value)}")
+    return FeatureSpec(
+        numeric_cols=numeric_cols,
+        categorical_cols=categorical_cols,
+        categorical_vocab=categorical_vocab,
+        encoded_columns=encoded_columns,
+        feature_priority={},
+    )
+
+
+
+def align_transformed_features(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    aligned = {}
+    n = len(df)
+    for col in columns:
+        key = str(col)
+        if key in df.columns:
+            aligned[key] = df[key].to_numpy(copy=False)
+        elif '__' in key:
+            aligned[key] = np.zeros(n, dtype=np.float32)
+        else:
+            aligned[key] = np.full(n, np.nan, dtype=np.float32)
+    return pd.DataFrame(aligned, index=df.index)
+
+
+
+def load_saved_group_metadata(reuse_dir: Path) -> pd.DataFrame:
+    selected_groups_path = reuse_dir / 'selected_groups.csv'
+    species_summary_path = reuse_dir / 'species_score_summary.csv'
+    selected_groups = pd.read_csv(selected_groups_path, low_memory=False) if selected_groups_path.exists() else pd.DataFrame()
+    species_summary = pd.read_csv(species_summary_path, low_memory=False) if species_summary_path.exists() else pd.DataFrame()
+
+    if not species_summary.empty:
+        meta = species_summary.copy()
+        if not selected_groups.empty:
+            extra_cols = [col for col in selected_groups.columns if col not in meta.columns or col == 'group']
+            selected_extra = selected_groups[extra_cols].copy()
+            meta = meta.merge(selected_extra, on='group', how='left', suffixes=('', '_selected'))
+            for col in ['matched_species_name', *TAXON_RANKS, 'occurrence_count']:
+                alt = f'{col}_selected'
+                if alt in meta.columns:
+                    if col not in meta.columns:
+                        meta[col] = meta[alt]
+                    else:
+                        meta[col] = meta[col].where(meta[col].notna(), meta[alt])
+                    meta = meta.drop(columns=[alt])
+    elif not selected_groups.empty:
+        meta = selected_groups.copy()
+    else:
+        raise FileNotFoundError(f'Could not find selected_groups.csv or species_score_summary.csv under {reuse_dir}')
+
+    if 'group' not in meta.columns:
+        raise KeyError(f'Saved metadata under {reuse_dir} is missing the group column')
+
+    for col in ['group', 'matched_species_name', *TAXON_RANKS, 'occurrence_count', 'model_name', 'model_path']:
+        if col not in meta.columns:
+            meta[col] = pd.NA
+    return meta
+
+
+
+def resolve_saved_model_path(reuse_dir: Path, row: pd.Series) -> Path:
+    slug = safe_slug(row.get('group', 'group'))
+    candidate = reuse_dir / 'models' / f'{slug}.joblib'
+    if candidate.exists():
+        return candidate.resolve()
+    model_path = row.get('model_path', pd.NA)
+    if pd.notna(model_path) and str(model_path).strip():
+        candidate = Path(str(model_path)).expanduser()
+        if candidate.exists():
+            return candidate.resolve()
+    return (reuse_dir / 'models' / f'{slug}.joblib').resolve()
+
+
+
+def run_saved_model_deployment(args, outdir: Path) -> int:
+    reuse_dir = Path(args.reuse_models_from).expanduser().resolve()
+    if not reuse_dir.exists() or not reuse_dir.is_dir():
+        raise FileNotFoundError(f'Missing reuse-models directory: {reuse_dir}')
+
+    deploy_grid_value = args.deploy_grid_csv or args.grid_csv or args.occurrences_csv
+    if not deploy_grid_value:
+        raise ValueError('A grid CSV is required in reuse mode. Pass it positionally or via --deploy-grid-csv.')
+    grid_csv = Path(deploy_grid_value).expanduser().resolve()
+    if not grid_csv.exists():
+        raise FileNotFoundError(f'Missing deploy grid CSV: {grid_csv}')
+
+    include_selectors = parse_selector_list(args.include_taxa)
+    exclude_selectors = parse_selector_list(args.exclude_taxa)
+
+    saved_meta = load_saved_group_metadata(reuse_dir)
+    saved_meta = apply_taxon_filters(saved_meta, include_selectors, exclude_selectors, args.group_by)
+    if args.max_groups > 0 and len(saved_meta) > int(args.max_groups):
+        occ_counts = pd.to_numeric(saved_meta.get('occurrence_count', pd.Series(index=saved_meta.index, dtype=float)), errors='coerce').fillna(0)
+        saved_meta = saved_meta.assign(__occurrence_count__=occ_counts)
+        saved_meta = saved_meta.sort_values(['__occurrence_count__', 'group'], ascending=[False, True]).head(int(args.max_groups)).drop(columns=['__occurrence_count__'])
+    saved_meta = saved_meta.reset_index(drop=True)
+    if saved_meta.empty:
+        raise RuntimeError('No saved models remain after taxon filtering')
+
+    log(f'[reuse] source_models={reuse_dir}')
+    log(f'[load] grid={grid_csv}')
+
+    model_infos = []
+    union_numeric_cols = set()
+    union_categorical_cols = set()
+    feature_rows = []
+    for row in saved_meta.itertuples(index=False):
+        row_dict = dict(row._asdict())
+        group = str(row_dict.get('group', ''))
+        model_path = resolve_saved_model_path(reuse_dir, pd.Series(row_dict))
+        if not model_path.exists():
+            log(f'[skip] group={group} missing_model={model_path}')
+            continue
+        payload = joblib.load(model_path)
+        spec = build_feature_spec_from_saved_payload(payload)
+        final_feature_columns = [str(col) for col in payload.get('final_feature_columns', []) if str(col)]
+        raw_feature_columns = [str(col) for col in payload.get('raw_feature_columns', []) if str(col)] or list(spec.encoded_columns)
+        model_name = str(payload.get('model_name', row_dict.get('model_name', 'saved_model')))
+        model_infos.append({
+            'group': group,
+            'row': row_dict,
+            'model_path': model_path,
+            'model_name': model_name,
+            'numeric_cols': list(spec.numeric_cols),
+            'categorical_cols': list(spec.categorical_cols),
+            'raw_feature_columns': raw_feature_columns,
+            'final_feature_columns': final_feature_columns,
+        })
+        union_numeric_cols.update(spec.numeric_cols)
+        union_categorical_cols.update(spec.categorical_cols)
+        numeric_set = set(spec.numeric_cols)
+        categorical_set = set(spec.categorical_cols)
+        final_set = set(final_feature_columns)
+        for feature in raw_feature_columns:
+            base_feature = str(feature).split('__', 1)[0]
+            if feature in numeric_set and '__' not in str(feature):
+                kind = 'numeric'
+            elif base_feature in categorical_set:
+                kind = 'categorical'
+            else:
+                kind = 'encoded'
+            feature_rows.append({
+                'group': group,
+                'feature': str(feature),
+                'source_feature': base_feature,
+                'kind': kind,
+                'selected_for_model': int(str(feature) in final_set),
+                'model_name': model_name,
+            })
+
+    if not model_infos:
+        raise RuntimeError('No saved models could be loaded from the reuse directory')
+
+    pd.DataFrame([info['row'] for info in model_infos]).to_csv(outdir / 'selected_groups.csv', index=False)
+
+    grid_head_raw = pd.read_csv(grid_csv, nrows=2000, low_memory=False)
+    grid_head_work, grid_tc_meta = build_terraclimate_working_df(grid_head_raw)
+    if args.id_col not in grid_head_raw.columns:
+        raise KeyError(f'Grid id column not found in deploy grid CSV: {args.id_col}')
+    if args.x_col not in grid_head_raw.columns or args.y_col not in grid_head_raw.columns:
+        raise KeyError(f'Grid coordinate columns not found in deploy grid CSV: {args.x_col}, {args.y_col}')
+
+    grid_usecols = resolve_required_raw_columns(
+        grid_head_raw,
+        grid_tc_meta,
+        sorted(union_numeric_cols) + sorted(union_categorical_cols),
+        [args.id_col, args.x_col, args.y_col],
+    )
+    grid_raw = read_minimal_csv(grid_csv, usecols=grid_usecols)
+    grid_work, _ = build_terraclimate_working_df(grid_raw)
+    grid_work[args.id_col] = grid_raw[args.id_col]
+    grid_work[args.x_col] = pd.to_numeric(grid_raw[args.x_col], errors='coerce')
+    grid_work[args.y_col] = pd.to_numeric(grid_raw[args.y_col], errors='coerce')
+    grid_work = grid_work.dropna(subset=[args.x_col, args.y_col]).reset_index(drop=True)
+
+    if grid_work.empty:
+        raise RuntimeError('No valid grid rows remain after dropping missing coordinates')
+
+    pd.DataFrame(feature_rows).to_csv(outdir / 'selected_features.csv', index=False)
+
+    pred_stack = []
+    pred_raw_stack = []
+    thresholds = []
+    artifacts = []
+    species_rows = []
+    by_species_dir = outdir / 'by_species'
+    by_species_dir.mkdir(parents=True, exist_ok=True)
+
+    for info in model_infos:
+        group = str(info['group'])
+        slug = safe_slug(group)
+        payload = joblib.load(info['model_path'])
+        spec = build_feature_spec_from_saved_payload(payload)
+        raw_feature_columns = [str(col) for col in payload.get('raw_feature_columns', []) if str(col)] or list(spec.encoded_columns)
+        final_feature_columns = [str(col) for col in payload.get('final_feature_columns', []) if str(col)]
+        if not final_feature_columns:
+            raise RuntimeError(f'Saved model for {group} is missing final_feature_columns')
+        grid_X_all = transform_features(grid_work, spec)
+        grid_X_aligned = align_transformed_features(grid_X_all, raw_feature_columns)
+        imputer = payload.get('imputer')
+        final_model = payload.get('model')
+        if imputer is None or final_model is None:
+            raise RuntimeError(f'Saved model payload is incomplete for {group}: {info["model_path"]}')
+        grid_X_imp = pd.DataFrame(imputer.transform(grid_X_aligned), columns=raw_feature_columns, index=grid_X_aligned.index)
+        grid_X_final = grid_X_imp[final_feature_columns]
+        raw_proba = predict_in_chunks(final_model, grid_X_final, int(args.predict_chunk_size))
+
+        conservative_spec = payload.get('conservative_suitability_spec')
+        if isinstance(conservative_spec, dict) and conservative_spec:
+            conservative_suitability, center_weight, novelty_penalty, adjustment_factor = apply_conservative_suitability_spec(grid_X_final, raw_proba, conservative_spec)
+        else:
+            conservative_suitability = raw_proba.astype(np.float32, copy=False)
+            center_weight = np.ones(len(raw_proba), dtype=np.float32)
+            novelty_penalty = np.ones(len(raw_proba), dtype=np.float32)
+            adjustment_factor = np.ones(len(raw_proba), dtype=np.float32)
+        deployment_mode = str(payload.get('deployment_score_mode', 'raw'))
+        deployment_threshold = float(payload.get('deployment_threshold', payload.get('threshold_raw_cv', 0.5)))
+        deployed_score = conservative_suitability if deployment_mode == 'conservative' and isinstance(conservative_spec, dict) and conservative_spec else raw_proba
+        model_name = str(payload.get('model_name', info.get('model_name', 'saved_model')))
+
+        species_out = pd.DataFrame({
+            args.id_col: grid_work[args.id_col].tolist(),
+            args.x_col: grid_work[args.x_col].tolist(),
+            args.y_col: grid_work[args.y_col].tolist(),
+            'ml_probability_raw': raw_proba,
+            'ml_center_weight': center_weight,
+            'ml_novelty_penalty': novelty_penalty,
+            'ml_adjustment_factor': adjustment_factor,
+            'ml_suitability': conservative_suitability,
+            'ml_probability': deployed_score,
+            'ml_likely': (deployed_score >= deployment_threshold).astype(np.int8),
+            'model_name': model_name,
+        })
+        species_out.to_csv(by_species_dir / f'{slug}.csv', index=False)
+
+        row_meta = dict(info['row'])
+        species_row = {k: (None if pd.isna(v) else v) for k, v in row_meta.items()}
+        species_row.update({
+            'group': group,
+            'model_name': model_name,
+            'feature_count': int(len(final_feature_columns)),
+            'deployment_feature_count': int(len((conservative_spec or {}).get('features', []))) if isinstance(conservative_spec, dict) else 0,
+            'deployment_score_mode': deployment_mode,
+            'deployment_threshold': deployment_threshold,
+            'mean_grid_probability_raw': float(np.nanmean(raw_proba)),
+            'max_grid_probability_raw': float(np.nanmax(raw_proba)),
+            'mean_grid_suitability': float(np.nanmean(conservative_suitability)),
+            'max_grid_suitability': float(np.nanmax(conservative_suitability)),
+            'mean_grid_probability': float(np.nanmean(deployed_score)),
+            'max_grid_probability': float(np.nanmax(deployed_score)),
+            'model_path': str(info['model_path']),
+            'source_model_run': str(reuse_dir),
+        })
+        species_rows.append(species_row)
+
+        pred_stack.append(deployed_score)
+        pred_raw_stack.append(raw_proba)
+        thresholds.append(deployment_threshold)
+        artifacts.append({'group': group, 'slug': slug, 'model_name': model_name, 'threshold': deployment_threshold, 'model_path': str(info['model_path'])})
+        log(f'[reuse] group={group} model={model_name} deploy_thr={deployment_threshold:.3f} features={len(final_feature_columns):,}')
+
+    if not pred_stack:
+        raise RuntimeError('No saved models were successfully scored on the deploy grid')
+
+    pred_arr = np.vstack(pred_stack).astype(np.float32)
+    pred_raw_arr = np.vstack(pred_raw_stack).astype(np.float32)
+    pred_valid = np.isfinite(pred_arr)
+    pred_raw_valid = np.isfinite(pred_raw_arr)
+    selected_group_names = [a['group'] for a in artifacts]
+    n_rows = pred_arr.shape[1]
+    safe_pred = np.where(pred_valid, pred_arr, -np.inf)
+    safe_pred_raw = np.where(pred_raw_valid, pred_raw_arr, -np.inf)
+    top_idx = np.argmax(safe_pred, axis=0)
+    top_score = safe_pred[top_idx, np.arange(n_rows)]
+    top_group = np.array([selected_group_names[i] for i in top_idx], dtype=object)
+    no_score = ~np.isfinite(top_score) | (top_score == -np.inf)
+    top_score = np.where(no_score, np.nan, top_score)
+    top_group = np.where(no_score, '', top_group)
+
+    overall_ml = np.max(safe_pred, axis=0)
+    overall_ml = np.where(np.isfinite(overall_ml) & (overall_ml > -np.inf), overall_ml, np.nan).astype(np.float32)
+    overall_ml_raw = np.max(safe_pred_raw, axis=0)
+    overall_ml_raw = np.where(np.isfinite(overall_ml_raw) & (overall_ml_raw > -np.inf), overall_ml_raw, np.nan).astype(np.float32)
+    overall_ml_min = finite_min_score(pred_arr, pred_valid)
+    overall_ml_joint = joint_support_score(pred_arr, pred_valid, min_share=args.joint_min_share, tail_fraction=args.joint_tail_fraction, rank_power=args.joint_rank_power)
+    threshold_arr = np.asarray(thresholds, dtype=np.float32)[:, None]
+    richness_ml = np.sum(np.where(pred_valid, pred_arr >= threshold_arr, False), axis=0).astype(np.int32)
+
+    overall_df = pd.DataFrame({
+        args.id_col: grid_work[args.id_col].tolist(),
+        args.x_col: grid_work[args.x_col].tolist(),
+        args.y_col: grid_work[args.y_col].tolist(),
+        'overall_ml_raw': overall_ml_raw,
+        'overall_ml_suitability': overall_ml,
+        'overall_ml': overall_ml,
+        'overall_ml_min': overall_ml_min,
+        'overall_ml_joint': overall_ml_joint,
+        'richness_ml': richness_ml,
+        'top_group_ml': top_group,
+        'top_ml_score': top_score,
+    })
+    overall_df.to_csv(outdir / 'overall_suitability.csv', index=False)
+
+    species_summary_df = pd.DataFrame(species_rows)
+    sort_cols = [col for col in ['mean_grid_probability', 'max_grid_probability', 'group'] if col in species_summary_df.columns]
+    ascending = [{'mean_grid_probability': False, 'max_grid_probability': False, 'group': True}[col] for col in sort_cols]
+    if sort_cols:
+        species_summary_df = species_summary_df.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+    species_summary_df.to_csv(outdir / 'species_score_summary.csv', index=False)
+
+    if int(args.preview_top_n) > 0:
+        preview_dir = outdir / 'previews'
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_point_map(overall_df, 'overall_ml', 'overall ML suitability', preview_dir / 'overall_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+        preview_point_map(overall_df, 'overall_ml_min', 'overall ML minimum overlap', preview_dir / 'overall_ml_min.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+        preview_point_map(overall_df, 'overall_ml_joint', 'overall ML joint suitability', preview_dir / 'overall_ml_joint.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+        preview_point_map(overall_df, 'richness_ml', 'richness above species thresholds', preview_dir / 'richness_ml.png', args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, None)
+        for row in species_summary_df.head(int(args.preview_top_n)).itertuples(index=False):
+            dfp = pd.read_csv(outdir / 'by_species' / f"{safe_slug(row.group)}.csv", usecols=[args.x_col, args.y_col, 'ml_probability'], low_memory=False)
+            preview_point_map(dfp, 'ml_probability', f'{row.group} ML suitability', preview_dir / 'by_species' / f"{safe_slug(row.group)}_ml.png", args.x_col, args.y_col, args.preview_point_alpha, args.preview_coarsen, args.preview_vmax, args.preview_minimum_score_threshold)
+
+    source_manifest_path = reuse_dir / 'manifest.json'
+    source_manifest = {}
+    if source_manifest_path.exists():
+        try:
+            source_manifest = json.loads(source_manifest_path.read_text(encoding='utf-8'))
+        except Exception:
+            source_manifest = {}
+
+    manifest = {
+        'mode': 'reuse_models',
+        'reuse_models_from': str(reuse_dir),
+        'source_manifest': source_manifest,
+        'deploy_grid_csv': str(grid_csv),
+        'outdir': str(outdir),
+        'group_by': args.group_by,
+        'include_taxa': [s.raw for s in include_selectors],
+        'exclude_taxa': [s.raw for s in exclude_selectors],
+        'selected_group_count': int(len(selected_group_names)),
+        'selected_groups': selected_group_names,
+        'predict_chunk_size': int(args.predict_chunk_size),
+        'joint_min_share': float(args.joint_min_share),
+        'joint_tail_fraction': float(args.joint_tail_fraction),
+        'joint_rank_power': float(args.joint_rank_power),
+        'score_interpretation': 'Presence-background relative suitability score deployed from previously trained saved models. ml_probability_raw is the raw tree score. ml_suitability is the conservative center-weighted score when the saved model payload includes it. This is not a true occurrence probability unless true absences and prevalence assumptions are provided.',
+    }
+    write_manifest(outdir / 'manifest.json', manifest)
+    log(f'[done] groups={len(artifacts)} grid_rows={len(grid_work):,} outdir={outdir}')
+    return 0
+
+
 def predict_in_chunks(model, X: pd.DataFrame, chunk_size: int) -> np.ndarray:
     chunk_size = max(1, int(chunk_size))
     out = np.full(len(X), np.nan, dtype=np.float32)
@@ -1417,6 +1789,45 @@ def fit_estimator_with_optional_weights(estimator, X, y, sample_weight: Optional
     return estimator
 
 
+def remap_multiclass_labels_contiguous(y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    y_arr = np.asarray(y, dtype=np.int32)
+    present_classes = np.unique(y_arr).astype(np.int32)
+    class_to_local = {int(cls): idx for idx, cls in enumerate(present_classes.tolist())}
+    y_local = np.asarray([class_to_local[int(cls)] for cls in y_arr], dtype=np.int32)
+    return y_local, present_classes
+
+
+def expand_multiclass_fold_probabilities(
+    proba_local: np.ndarray,
+    present_classes: np.ndarray,
+    estimator_classes: Optional[np.ndarray],
+    n_classes: int,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    local = np.asarray(proba_local, dtype=np.float32)
+    if local.ndim == 1:
+        local = local[:, None]
+    present = np.asarray(present_classes, dtype=np.int32)
+    if estimator_classes is None:
+        estimator_local_classes = np.arange(local.shape[1], dtype=np.int32)
+    else:
+        estimator_local_classes = np.asarray(estimator_classes, dtype=np.int32)
+    if local.shape[1] != len(estimator_local_classes):
+        raise ValueError('predict_proba column count does not match estimator classes for community CV fold')
+    if estimator_local_classes.size == 0:
+        raise ValueError('Community CV fold estimator returned no classes')
+    if np.any(estimator_local_classes < 0) or np.any(estimator_local_classes >= len(present)):
+        raise ValueError('Community CV fold estimator classes are out of range for remapped labels')
+
+    full_class_indices = present[estimator_local_classes]
+    expanded = np.full((local.shape[0], int(n_classes)), float(eps), dtype=np.float32)
+    expanded[:, full_class_indices] = np.maximum(local, float(eps))
+    row_sums = expanded.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums > 0.0, row_sums, 1.0)
+    expanded = expanded / row_sums
+    return expanded.astype(np.float32, copy=False)
+
+
 def evaluate_multiclass_model_cv(X: pd.DataFrame, y: np.ndarray, coords_x: np.ndarray, coords_y: np.ndarray, args, estimator, class_names: Sequence[str]):
     splitter, groups, cv_scheme = build_multiclass_cv_splitter(y, coords_x, coords_y, int(args.cv_folds), float(args.cv_block_size), int(args.random_state))
     if splitter is None:
@@ -1443,16 +1854,21 @@ def evaluate_multiclass_model_cv(X: pd.DataFrame, y: np.ndarray, coords_x: np.nd
         y_train = y_arr[train_idx]
         x_test = X.iloc[test_idx]
         y_test = y_arr[test_idx]
-        if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+        train_classes = np.unique(y_train).astype(np.int32)
+        test_classes = np.unique(y_test).astype(np.int32)
+        if train_classes.size < 2 or test_classes.size < 2:
             continue
+        y_train_local, present_train_classes = remap_multiclass_labels_contiguous(y_train)
         est = clone(estimator)
-        weights_train = compute_multiclass_class_weights(y_train)
+        weights_train = compute_multiclass_class_weights(y_train_local)
         fit_t0 = time.perf_counter()
-        fit_estimator_with_optional_weights(est, x_train, y_train, weights_train)
+        fit_estimator_with_optional_weights(est, x_train, y_train_local, weights_train)
         fit_seconds = time.perf_counter() - fit_t0
         pred_t0 = time.perf_counter()
-        proba = np.asarray(est.predict_proba(x_test), dtype=np.float32)
+        proba_local = np.asarray(est.predict_proba(x_test), dtype=np.float32)
         predict_seconds = time.perf_counter() - pred_t0
+        estimator_classes = getattr(est, 'classes_', None)
+        proba = expand_multiclass_fold_probabilities(proba_local, present_train_classes, estimator_classes, n_classes)
         pred = np.argmax(proba, axis=1).astype(np.int32)
         oof_pred[test_idx, :] = proba
         fold_rows.append({
@@ -1461,8 +1877,10 @@ def evaluate_multiclass_model_cv(X: pd.DataFrame, y: np.ndarray, coords_x: np.nd
             'train_rows': int(len(train_idx)),
             'train_rows_before_buffer': int(original_train_rows),
             'test_rows': int(len(test_idx)),
-            'train_class_count': int(np.unique(y_train).size),
-            'test_class_count': int(np.unique(y_test).size),
+            'train_class_count': int(train_classes.size),
+            'test_class_count': int(test_classes.size),
+            'missing_train_class_count': int(n_classes - train_classes.size),
+            'missing_test_class_count': int(n_classes - test_classes.size),
             'accuracy': metric_or_nan(accuracy_score, y_test, pred),
             'balanced_accuracy': metric_or_nan(balanced_accuracy_score, y_test, pred),
             'macro_f1': metric_or_nan(f1_score, y_test, pred, average='macro', zero_division=0),
@@ -1744,6 +2162,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument('grid_csv', nargs='?', default=None, help='Grid CSV with matching environmental predictors, usually grid_with_env.csv')
     ap.add_argument('--trend-summary', default=None, help='Directory with aggregate_occurrence_trends.py outputs. Defaults to <occurrences_csv_dir>/trend_summary')
     ap.add_argument('--outdir', required=True, help='Output directory')
+    ap.add_argument('--reuse-models-from', default=None, help='Existing xgboost_suitability.py output directory containing models/*.joblib to score on a new grid without retraining')
+    ap.add_argument('--deploy-grid-csv', default=None, help='Grid CSV to score when --reuse-models-from is set. You can also pass the grid CSV as the first positional argument in reuse mode.')
     ap.add_argument('--make-previews', action='store_true', help='Generate preview PNGs from existing outputs under --outdir without retraining the ML models')
     ap.add_argument('--group-by', default='matched_species_name', help='Grouping column, usually matched_species_name')
     ap.add_argument('--include-taxa', nargs='*', default=None, help='Optional rank selectors such as family:Rosaceae genus:Ribes species:Daucus pusillus')
@@ -1842,8 +2262,13 @@ def main() -> int:
         log(f'[previews] regenerated previews under {outdir / "previews"}')
         return 0
 
+    if args.reuse_models_from:
+        if bool(getattr(args, 'train_community_model', False)):
+            log('[reuse] train-community-model is ignored in reuse mode')
+        return run_saved_model_deployment(args, outdir)
+
     if not args.occurrences_csv or not args.grid_csv:
-        raise ValueError('occurrences_csv and grid_csv are required unless --make-previews is set')
+        raise ValueError('occurrences_csv and grid_csv are required unless --make-previews or --reuse-models-from is set')
 
     occ_csv = Path(args.occurrences_csv).resolve()
     grid_csv = Path(args.grid_csv).resolve()
@@ -1938,6 +2363,7 @@ def main() -> int:
     pred_stack = []
     pred_raw_stack = []
     thresholds = []
+    selected_group_names = [str(g) for g in group_meta['group'].astype(str).tolist()]
     group_names = []
 
     model_comp_dir = outdir / 'model_comparison'
@@ -2209,13 +2635,13 @@ def main() -> int:
         pred_raw_arr = np.vstack(pred_raw_stack).astype(np.float32)
         pred_valid = np.isfinite(pred_arr)
         pred_raw_valid = np.isfinite(pred_raw_arr)
-        group_names = [a['group'] for a in artifacts]
+        selected_group_names = [a['group'] for a in artifacts]
         n_rows = pred_arr.shape[1]
         safe_pred = np.where(pred_valid, pred_arr, -np.inf)
         safe_pred_raw = np.where(pred_raw_valid, pred_raw_arr, -np.inf)
         top_idx = np.argmax(safe_pred, axis=0)
         top_score = safe_pred[top_idx, np.arange(n_rows)]
-        top_group = np.array([group_names[i] for i in top_idx], dtype=object)
+        top_group = np.array([selected_group_names[i] for i in top_idx], dtype=object)
         no_score = ~np.isfinite(top_score) | (top_score == -np.inf)
         top_score = np.where(no_score, np.nan, top_score)
         top_group = np.where(no_score, '', top_group)
@@ -2270,8 +2696,8 @@ def main() -> int:
         'group_by': args.group_by,
         'include_taxa': [s.raw for s in include_selectors],
         'exclude_taxa': [s.raw for s in exclude_selectors],
-        'selected_group_count': int(len(artifacts)),
-        'selected_groups': group_names,
+        'selected_group_count': int(len(selected_group_names)),
+        'selected_groups': selected_group_names,
         'community_only': bool(getattr(args, 'community_only', False)),
         'numeric_feature_count': int(len(spec.numeric_cols)),
         'categorical_feature_count': int(len(spec.categorical_cols)),
