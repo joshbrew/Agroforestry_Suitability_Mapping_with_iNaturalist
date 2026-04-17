@@ -28,7 +28,7 @@ Look at iNaturalistOccurrences and Suitability folders for how to start processi
 Note our results are using an "artist's touch" to manually adjust eta-squared priors and manually control the blending between the ML and eta-squared results. The actual realism is species-dependent and requires more survey data, but this is already a great result running on fairly naive assumptions.
 
 Fairbanks North Star Borough, White Spruce (green) and Poplar/Cottonwood (red) blended suitability map mixed in QGIS. The more limited poplar range is likely due to sparsity of iNaturalist records as they are found everywhere in town. 
-<img width="18460" height="4960" alt="raster" src="https://github.com/user-attachments/assets/06980cdc-167a-4b07-9b92-61ff37405ca8" /> Where you find good mixes of these, you find one of the best edible mushrooms :P
+<img width="18460" height="4960" alt="raster" src="https://github.com/user-attachments/assets/06980cdc-167a-4b07-9b92-61ff37405ca8" /> Where you find good mixes of these, you find one of the best edible mushrooms :P We validated parts of this map by asking local foragers about their previous season. Not bad for a shot in the dark.
 
 
 Blending eta-squared with the classifier probabilites gives the most convincing results, e.g. the deserts truly are not suitable for most of the plants here:
